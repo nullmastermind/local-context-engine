@@ -94,7 +94,7 @@ def codebase_retrieval(
         llm_cfg = cfg.llm
         llm_client = LLMClient(
             provider=llm_cfg.provider,
-            model=llm_cfg.model,
+            model=llm_cfg.resolved_model(),
             api_key=llm_cfg.resolved_api_key(),
             aws_region=llm_cfg.aws_region,
             azure_endpoint=llm_cfg.azure_endpoint,
@@ -108,7 +108,7 @@ def codebase_retrieval(
     search_queries, _keywords = enhance_query(query, llm_client if use_llm else None)
 
     # --- Embedding model ---
-    model_name = cfg.storage.model
+    model_name = cfg.storage.resolved_model()
     emb_model: EmbeddingModel
     if model_name.startswith("gemini-"):
         emb_model = GoogleEmbeddingModel(model_name)

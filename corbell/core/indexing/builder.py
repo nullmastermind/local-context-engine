@@ -55,7 +55,7 @@ class IndexBuilder:
             if not repos:
                 raise ValueError(f"Repo '{repo_filter}' not found in workspace.yaml")
 
-        model_name = cfg.storage.model
+        model_name = cfg.storage.resolved_model()
 
         # Model safety check (skip on full rebuild)
         if not rebuild:

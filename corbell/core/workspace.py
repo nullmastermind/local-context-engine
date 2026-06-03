@@ -22,12 +22,25 @@ class RepoConfig(BaseModel):
 
 
 class StorageConfig(BaseModel):
-    """Storage sub-config (single SQLite file for both graph and embeddings)."""
+    """Storage sub-config (single SQLite file for both graph and embeddings).
+
+    The embedding model can be overridden via the ``CORBELL_EMBEDDING_MODEL``
+    environment variable without touching workspace.yaml.
+    """
 
     path: str = ".corbell/workspace.db"
     model: str = "all-MiniLM-L6-v2"
 
     model_config = {"extra": "ignore"}
+
+    def resolved_model(self) -> str:
+        """Return the effective embedding model name.
+
+        Resolution order:
+        1. ``CORBELL_EMBEDDING_MODEL`` env var (if set)
+        2. ``model`` field from workspace.yaml
+        """
+        return os.environ.get("CORBELL_EMBEDDING_MODEL") or self.model
 
 
 class QueryConfig(BaseModel):
@@ -55,11 +68,16 @@ class IndexingConfig(BaseModel):
 class LLMConfig(BaseModel):
     """LLM provider configuration.
 
-    Local providers: openai, anthropic, ollama.
+    Local providers: openai, anthropic, ollama, google.
     Cloud providers: aws (Bedrock), azure (Azure OpenAI), gcp (Vertex AI).
 
     API key can be provided here or via env vars:
     ANTHROPIC_API_KEY, OPENAI_API_KEY, AZURE_OPENAI_API_KEY, CORBELL_LLM_API_KEY
+
+    Model can be overridden via env vars (checked in order):
+    1. Provider-specific: ANTHROPIC_MODEL, OPENAI_MODEL, GOOGLE_MODEL, etc.
+    2. Generic: CORBELL_LLM_MODEL
+    3. ``model`` field from workspace.yaml
     """
 
     provider: str = "anthropic"
@@ -79,6 +97,30 @@ class LLMConfig(BaseModel):
     gcp_region: Optional[str] = None
 
     model_config = {"extra": "ignore"}
+
+    def resolved_model(self) -> str:
+        """Return the effective LLM model name.
+
+        Resolution order:
+        1. Provider-specific env var (e.g. ``ANTHROPIC_MODEL``, ``GOOGLE_MODEL``)
+        2. ``CORBELL_LLM_MODEL`` env var
+        3. ``model`` field from workspace.yaml
+        """
+        provider_env_map = {
+            "anthropic": "ANTHROPIC_MODEL",
+            "openai": "OPENAI_MODEL",
+            "google": "GOOGLE_MODEL",
+            "ollama": "OLLAMA_MODEL",
+            "aws": "AWS_MODEL",
+            "azure": "AZURE_MODEL",
+            "gcp": "GCP_MODEL",
+        }
+        provider_var = provider_env_map.get(self.provider.lower())
+        if provider_var:
+            val = os.environ.get(provider_var)
+            if val:
+                return val
+        return os.environ.get("CORBELL_LLM_MODEL") or self.model
 
     def resolved_api_key(self) -> Optional[str]:
         """Return the API key, resolving env var placeholders if needed."""
