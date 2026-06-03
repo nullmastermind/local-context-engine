@@ -25,14 +25,13 @@ dependencies = [
   "typer>=0.12",
   "pydantic>=2.0",
   "pyyaml>=6.0",
-  "sentence-transformers>=3.0",
-  "transformers<5.0.0",
-  "numpy>=1.26,<2.0",
+  "numpy>=2.0",
   "rich>=13.0",
   "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
+local    = ["sentence-transformers>=3.0", "transformers<5.0.0"]
 openai   = ["openai>=1.0"]
 anthropic = ["anthropic>=0.25"]
 google   = ["google-genai>=2.7.0"]
