@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -10,6 +11,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from corbell.core.gitignore import load_gitignore
 from corbell.core.indexing.tracker import IndexTracker
+
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -230,20 +233,6 @@ class IndexBuilder:
                     f"Run 'corbell index build --rebuild' to re-index."
                 )
 
-        # Full rebuild: clear everything
-        if rebuild:
-            if repo_filter:
-                # Only clear the specific repo's data
-                emb_store.clear(service_id=repo_filter)
-                graph_store.delete_service_data(repo_filter)
-                tracker.remove_tracked(
-                    [(r.id, r.id) for r in repos]  # placeholder; real cleanup below
-                )
-            else:
-                emb_store.clear()
-                graph_store.clear()
-                tracker.clear_all()
-
         indexing = cfg.indexing
         extractor = CodeChunkExtractor(
             chunk_size=indexing.chunk_size,
@@ -260,7 +249,8 @@ class IndexBuilder:
         if rebuild:
             return self._full_build(
                 repos, emb_store, graph_store, tracker, extractor, model,
-                indexing, model_name, db_path, progress_fn=progress_fn,
+                indexing, model_name, db_path, repo_filter=repo_filter,
+                progress_fn=progress_fn,
             )
         else:
             stale = tracker.get_stale_files(repos, cfg)
@@ -284,6 +274,7 @@ class IndexBuilder:
         indexing: Any,
         model_name: str,
         db_path: Path,
+        repo_filter: Optional[str] = None,
         progress_fn: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
         """Run a full (re)build across all repos, serialised by IndexLock."""
@@ -293,7 +284,7 @@ class IndexBuilder:
         with lock:
             return self._full_build_locked(
                 repos, emb_store, graph_store, tracker, extractor, model,
-                indexing, model_name, progress_fn=progress_fn,
+                indexing, model_name, repo_filter=repo_filter, progress_fn=progress_fn,
             )
 
     def _full_build_locked(
@@ -306,9 +297,25 @@ class IndexBuilder:
         model: Any,
         indexing: Any,
         model_name: str,
+        repo_filter: Optional[str] = None,
         progress_fn: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
         """Inner full build — called while holding IndexLock."""
+        # C2: Skip if another process already completed a build very recently.
+        last_build = tracker.get_last_build_at()
+        if last_build is not None and (time.time() - last_build) < 30:
+            return {"status": "already_built", "chunks_added": 0, "repos_rebuilt": 0}
+
+        # C1: Clear the index inside the lock to eliminate the race window.
+        if repo_filter:
+            emb_store.clear(service_id=repo_filter)
+            graph_store.delete_service_data(repo_filter)
+            tracker.remove_tracked([(r.id, r.id) for r in repos])
+        else:
+            emb_store.clear()
+            graph_store.clear()
+            tracker.clear_all()
+
         total_chunks = 0
         total_repos = 0
         services_data = []
@@ -368,8 +375,9 @@ class IndexBuilder:
                 for future in as_completed(futures):
                     try:
                         chunks.extend(future.result())
-                    except Exception:
-                        pass  # individual file failures are non-fatal
+                    except Exception as exc:
+                        file_info = futures[future]
+                        logger.warning("Failed to extract %s: %s", file_info[0], exc)
 
             if progress_fn:
                 progress_fn(f"Indexing {repo_id} ({len(chunks)} chunks)...")
@@ -520,8 +528,9 @@ class IndexBuilder:
                 for future in as_completed(futures):
                     try:
                         chunks.extend(future.result())
-                    except Exception:
-                        pass  # individual file failures are non-fatal
+                    except Exception as exc:
+                        file_info = futures[future]
+                        logger.warning("Failed to extract %s: %s", file_info[0], exc)
 
             if chunks:
                 # Encode all chunks for this repo batch
