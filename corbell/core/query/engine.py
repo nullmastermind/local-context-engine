@@ -216,18 +216,15 @@ def codebase_retrieval(
         reranked_ids = rerank_chunks(query, merged, llm_client)
         rerank_elapsed = time.time() - rerank_start
         logger.info(
-            "Rerank complete: %.3fs, %d chunks reranked, order: %s",
+            "Rerank complete: %.3fs, %d/%d chunks kept, order: %s",
             rerank_elapsed,
+            len(reranked_ids),
             len(merged),
             reranked_ids,
         )
-        # Reorder merged by reranked_ids
+        # Reorder merged, keeping only chunks selected by the reranker
         id_to_chunk = {c.chunk_id: c for c in merged}
-        reranked = [id_to_chunk[cid] for cid in reranked_ids if cid in id_to_chunk]
-        # Add any chunks not returned by reranker at the end
-        reranked_set = set(reranked_ids)
-        leftover = [c for c in merged if c.chunk_id not in reranked_set]
-        merged = reranked + leftover
+        merged = [id_to_chunk[cid] for cid in reranked_ids if cid in id_to_chunk]
 
     # --- Format output ---
     repo_paths = {r.id: str(r.resolved_path) for r in cfg.repos if r.resolved_path}

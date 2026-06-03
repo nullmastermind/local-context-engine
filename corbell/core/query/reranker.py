@@ -14,13 +14,13 @@ def rerank_chunks(
     chunks: List["ScoredChunk"],
     llm_client: Optional[Any],
 ) -> List[str]:
-    """Rerank query results using an LLM for relevance filtering.
+    """Rerank and filter query results using an LLM.
 
-    Sends only metadata (no full source code) to the LLM to keep prompts small.
-    The LLM returns a JSON array of chunk_ids ordered by relevance.
+    Sends chunk content + metadata to the LLM. The LLM returns a JSON array
+    of 0-based chunk indices ordered by relevance, omitting irrelevant chunks.
 
-    On any failure (parse error, invalid IDs, LLM timeout), all chunk IDs are
-    returned in their original order (graceful fallback — never loses results).
+    On any failure (parse error, LLM timeout), all chunk IDs are returned
+    in their original order (graceful fallback).
 
     Args:
         query: The original user query.
@@ -29,6 +29,7 @@ def rerank_chunks(
 
     Returns:
         List of chunk_ids in reranked order (most relevant first).
+        Irrelevant chunks are excluded.
         Falls back to original order on any failure.
     """
     if not chunks:
@@ -39,42 +40,41 @@ def rerank_chunks(
     if llm_client is None or not getattr(llm_client, "is_configured", False):
         return all_ids
 
-    # Build metadata-only payload (no source code — keeps prompt small)
-    metadata = []
-    for chunk in chunks:
-        meta = {
-            "chunk_id": chunk.chunk_id,
-            "file": chunk.file_path,
-            "symbol": chunk.symbol or "",
-            "type": chunk.chunk_type,
-            "lines": f"{chunk.start_line}-{chunk.end_line}",
-        }
-        metadata.append(meta)
+    # Build payload with code content, indexed for compact LLM output
+    entries = []
+    for i, chunk in enumerate(chunks):
+        entry = (
+            f"[{i}] {chunk.file_path}:{chunk.start_line}-{chunk.end_line}"
+            f" ({chunk.chunk_type}, {chunk.symbol or 'no symbol'})\n"
+            f"{chunk.content}"
+        )
+        entries.append(entry)
 
     system = (
         "You are a code search relevance ranker. "
-        "Given a user query and a list of code chunks (metadata only), "
-        "return a JSON array of chunk_ids ordered from most relevant to least relevant. "
-        "Include only chunk_ids that are actually relevant to the query. "
-        "Return ONLY a valid JSON array of strings, nothing else."
+        "Given a query and numbered code chunks, return a JSON array of chunk "
+        "indices (integers) ordered from most relevant to least relevant. "
+        "OMIT chunks that are not relevant to the query. "
+        "Return ONLY a valid JSON array of integers, e.g. [2,0,5]."
     )
+
+    separator = "---\n"
+    chunks_text = separator.join(entries)
 
     user = (
         f"Query: {query}\n\n"
-        f"Chunks:\n{json.dumps(metadata, indent=2)}\n\n"
-        "Return JSON array of relevant chunk_ids (most relevant first):"
+        f"Chunks:\n{chunks_text}\n\n"
+        "Return JSON array of relevant chunk indices (most relevant first):"
     )
 
     try:
         response = llm_client.call(
             system, user,
-            max_tokens=1000,
+            max_tokens=200,
             temperature=0.0,
         )
 
-        # Parse the JSON response
         text = response.strip()
-        # Handle markdown code blocks
         if text.startswith("```"):
             lines = text.splitlines()
             text = "\n".join(
@@ -82,16 +82,16 @@ def rerank_chunks(
                 if not line.startswith("```")
             ).strip()
 
-        reranked_ids = json.loads(text)
+        indices = json.loads(text)
 
-        if not isinstance(reranked_ids, list):
+        if not isinstance(indices, list):
             return all_ids
 
-        # Validate that returned IDs are strings and exist in the original set
-        valid_id_set = set(all_ids)
+        # Validate indices are ints within range
+        n = len(chunks)
         filtered = [
-            chunk_id for chunk_id in reranked_ids
-            if isinstance(chunk_id, str) and chunk_id in valid_id_set
+            all_ids[idx] for idx in indices
+            if isinstance(idx, int) and 0 <= idx < n
         ]
 
         if not filtered:
@@ -100,5 +100,4 @@ def rerank_chunks(
         return filtered
 
     except Exception:
-        # Graceful fallback: return all IDs in original order
         return all_ids
