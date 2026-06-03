@@ -29,6 +29,7 @@ dependencies = [
   "transformers<5.0.0",
   "numpy>=1.26,<2.0",
   "rich>=13.0",
+  "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]

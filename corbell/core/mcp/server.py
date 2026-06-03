@@ -36,8 +36,8 @@ def context_engine_codebase_retrieval(
 
     Args:
         query: Natural language description of the code you're looking for.
-        workspace_full_path: Full path to workspace.yaml or its directory.
-            If empty, auto-detects from CORBELL_WORKSPACE env var or CWD.
+        workspace_full_path: Required. Full path to workspace.yaml or its directory.
+            Falls back to CORBELL_WORKSPACE env var if empty.
         top_k: Maximum number of code chunks to return (default 50).
         rerank: Whether to use LLM reranking for better relevance (default true).
 
@@ -48,8 +48,8 @@ def context_engine_codebase_retrieval(
         workspace_path = _resolve_workspace(workspace_full_path)
         if workspace_path is None:
             return (
-                "Error: workspace.yaml not found. "
-                "Pass workspace_full_path or set CORBELL_WORKSPACE env var."
+                "Error: workspace_full_path is required. "
+                "Pass the full path to workspace.yaml or its directory."
             )
 
         from pathlib import Path
@@ -122,7 +122,7 @@ def context_engine_codebase_retrieval(
 
 
 def _resolve_workspace(workspace_full_path: str) -> Optional[str]:
-    """Resolve the workspace path from parameter, env var, or CWD."""
+    """Resolve the workspace path from parameter or env var."""
     # 1. Explicit path provided
     if workspace_full_path and workspace_full_path.strip():
         return workspace_full_path.strip()
@@ -131,12 +131,6 @@ def _resolve_workspace(workspace_full_path: str) -> Optional[str]:
     env_path = os.environ.get("CORBELL_WORKSPACE")
     if env_path:
         return env_path
-
-    # 3. Walk up from CWD
-    from corbell.core.workspace import find_workspace_root
-    found = find_workspace_root()
-    if found:
-        return str(found / "workspace.yaml")
 
     return None
 

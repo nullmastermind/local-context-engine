@@ -139,9 +139,7 @@ def test_resolve_workspace_returns_none_when_nothing_found(tmp_path, monkeypatch
 
     monkeypatch.delenv("CORBELL_WORKSPACE", raising=False)
 
-    # Run from an isolated dir that has no workspace.yaml
-    with patch("corbell.core.workspace.find_workspace_root", return_value=None):
-        result = _resolve_workspace("")
+    result = _resolve_workspace("")
     assert result is None
 
 

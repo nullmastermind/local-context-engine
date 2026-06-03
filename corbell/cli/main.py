@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import typer
+from dotenv import load_dotenv
 from rich.console import Console
 
 from corbell.cli.commands.index import app as index_app
@@ -34,7 +37,6 @@ def init(
     force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing workspace.yaml."),
 ) -> None:
     """Initialize a Corbell workspace (creates corbell/workspace.yaml)."""
-    from pathlib import Path
     from corbell.core.workspace import init_workspace_yaml
 
     target = (Path(directory) if directory else Path.cwd()).resolve()
@@ -79,6 +81,7 @@ def mcp_serve(
 
 
 def main() -> None:
+    load_dotenv(dotenv_path=Path.cwd() / ".env")
     app()
 
 

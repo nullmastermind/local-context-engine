@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
@@ -18,8 +17,8 @@ def search(
     top: int = typer.Option(50, "--top", "-n", help="Maximum number of chunks to return."),
     no_llm: bool = typer.Option(False, "--no-llm", help="Disable LLM enhancement and reranking."),
     no_rerank: bool = typer.Option(False, "--no-rerank", help="Disable LLM reranking."),
-    workspace: Optional[str] = typer.Option(
-        None, "--workspace", "-w", help="Path to workspace.yaml or its directory."
+    workspace: str = typer.Option(
+        ..., "--workspace", "-w", help="Path to workspace.yaml or its directory."
     ),
 ) -> None:
     """Search the indexed codebase using natural language.
@@ -27,17 +26,8 @@ def search(
     Returns relevant code snippets with file paths and line numbers,
     formatted for use as LLM context.
     """
-    from corbell.core.workspace import find_workspace_root
-
     # Resolve workspace path
-    if workspace:
-        ws_path = Path(workspace)
-    else:
-        found = find_workspace_root()
-        if not found:
-            console.print("[red]Error:[/red] workspace.yaml not found. Run 'corbell init' first.")
-            raise typer.Exit(1)
-        ws_path = found / "workspace.yaml"
+    ws_path = Path(workspace)
 
     if not ws_path.exists() and ws_path.is_dir():
         ws_path = ws_path / "workspace.yaml"

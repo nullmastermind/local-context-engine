@@ -17,8 +17,8 @@ def build(
     rebuild: bool = typer.Option(
         False, "--rebuild", help="Clear existing index and perform a full rebuild."
     ),
-    workspace: Optional[str] = typer.Option(
-        None, "--workspace", "-w", help="Path to workspace.yaml or its directory."
+    workspace: str = typer.Option(
+        ..., "--workspace", "-w", help="Path to workspace.yaml or its directory."
     ),
     repo: Optional[str] = typer.Option(
         None, "--repo", help="Only index a specific repo by ID."
@@ -31,17 +31,9 @@ def build(
 
     Use --rebuild to force a full re-index from scratch.
     """
-    from corbell.core.workspace import load_workspace, find_workspace_root
+    from corbell.core.workspace import load_workspace
 
-    # Resolve workspace path
-    if workspace:
-        ws_path = Path(workspace)
-    else:
-        found = find_workspace_root()
-        if not found:
-            console.print("[red]Error:[/red] workspace.yaml not found. Run 'corbell init' first.")
-            raise typer.Exit(1)
-        ws_path = found / "workspace.yaml"
+    ws_path = Path(workspace)
 
     if not ws_path.exists() and ws_path.is_dir():
         ws_path = ws_path / "workspace.yaml"
