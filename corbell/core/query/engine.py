@@ -131,7 +131,8 @@ def codebase_retrieval(
     for sq in search_queries:
         try:
             if isinstance(emb_model, GoogleEmbeddingModel):
-                q_vecs = emb_model.encode([sq], task_type="RETRIEVAL_QUERY")
+                formatted_query = emb_model.prepare_query(sq) if emb_model.uses_prefix_format else sq
+                q_vecs = emb_model.encode([formatted_query], task_type="RETRIEVAL_QUERY")
             else:
                 q_vecs = emb_model.encode([sq])
         except Exception as exc:

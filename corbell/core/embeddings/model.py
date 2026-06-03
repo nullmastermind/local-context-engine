@@ -66,6 +66,25 @@ def _is_google_key_error(e: Exception) -> bool:
     return False
 
 
+def _parse_gemini_version(model_name: str) -> int:
+    """Parse the version number from a gemini-embedding model name.
+
+    Examples:
+        ``gemini-embedding-001`` → 1
+        ``gemini-embedding-2`` → 2
+
+    Returns 0 if the version cannot be parsed.
+    """
+    prefix = "gemini-embedding-"
+    if not model_name.startswith(prefix):
+        return 0
+    suffix = model_name[len(prefix):]
+    try:
+        return int(suffix)
+    except ValueError:
+        return 0
+
+
 class GoogleEmbeddingModel(EmbeddingModel):
     """Google AI (Gemini) embedding model via the google-genai SDK.
 
@@ -78,6 +97,11 @@ class GoogleEmbeddingModel(EmbeddingModel):
     Supports ``task_type`` to improve retrieval quality:
     - ``RETRIEVAL_DOCUMENT`` for indexing (default)
     - ``RETRIEVAL_QUERY`` for query-time encoding
+
+    For ``gemini-embedding-2`` and later, inline text prefixes are used
+    instead of relying solely on ``task_type`` for better retrieval quality.
+    Use ``prepare_query`` and ``prepare_document`` to format texts before
+    passing them to ``encode``.
     """
 
     def __init__(self, model_name: str = "gemini-embedding-001", api_key: Optional[str] = None):
@@ -94,6 +118,38 @@ class GoogleEmbeddingModel(EmbeddingModel):
         self._key_index: int = 0
         # kept for backwards-compat with tests that read _api_key directly
         self._api_key: str = self._api_keys[0]
+
+    @property
+    def uses_prefix_format(self) -> bool:
+        """Return True when the model requires inline text prefixes for best quality.
+
+        Activated for ``gemini-embedding-2`` and all later versions (version >= 2).
+        """
+        return _parse_gemini_version(self.model_name) >= 2
+
+    def prepare_query(self, query: str) -> str:
+        """Format a query string with a task prefix for retrieval.
+
+        Only applies the prefix when ``uses_prefix_format`` is True.
+        """
+        if self.uses_prefix_format:
+            return f"task: code retrieval | query: {query}"
+        return query
+
+    def prepare_document(self, content: str, title: Optional[str] = None) -> str:
+        """Format a document chunk with a title prefix for indexing.
+
+        Only applies the prefix when ``uses_prefix_format`` is True.
+
+        Args:
+            content: Raw chunk text.
+            title: Descriptive title, typically ``"{file_path}:{symbol}"``
+                   or ``"{file_path}:L{start}-{end}"``. Defaults to ``"none"``.
+        """
+        if self.uses_prefix_format:
+            resolved_title = title or "none"
+            return f"title: {resolved_title} | text: {content}"
+        return content
 
     def encode(self, texts: List[str], task_type: str = "RETRIEVAL_DOCUMENT") -> List[List[float]]:
         """Encode a list of texts into embedding vectors.

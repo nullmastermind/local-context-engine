@@ -150,7 +150,19 @@ class IndexBuilder:
                 gitignore_spec=gitignore_spec,
             )
             if chunks:
-                texts = [c.content for c in chunks]
+                from corbell.core.embeddings.model import GoogleEmbeddingModel
+                if isinstance(model, GoogleEmbeddingModel) and model.uses_prefix_format:
+                    texts = [
+                        model.prepare_document(
+                            c.content,
+                            title=f"{c.file_path}:{c.symbol}"
+                            if c.symbol
+                            else f"{c.file_path}:L{c.start_line}-{c.end_line}",
+                        )
+                        for c in chunks
+                    ]
+                else:
+                    texts = [c.content for c in chunks]
                 vectors = model.encode(texts)
                 for chunk, vec in zip(chunks, vectors):
                     chunk.embedding = vec
@@ -240,7 +252,19 @@ class IndexBuilder:
                 chunks = extractor._extract_file(abs_path, rel_path, lang, repo_id, str(repo_path))
 
                 if chunks:
-                    texts = [c.content for c in chunks]
+                    from corbell.core.embeddings.model import GoogleEmbeddingModel
+                    if isinstance(model, GoogleEmbeddingModel) and model.uses_prefix_format:
+                        texts = [
+                            model.prepare_document(
+                                c.content,
+                                title=f"{c.file_path}:{c.symbol}"
+                                if c.symbol
+                                else f"{c.file_path}:L{c.start_line}-{c.end_line}",
+                            )
+                            for c in chunks
+                        ]
+                    else:
+                        texts = [c.content for c in chunks]
                     vectors = model.encode(texts)
                     for chunk, vec in zip(chunks, vectors):
                         chunk.embedding = vec
