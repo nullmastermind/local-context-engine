@@ -410,18 +410,23 @@ class ServiceGraphBuilder:
         """Try to extract a database name from connection strings."""
         if db_type == 'sqlite':
             match = re.search(r'sqlite3\.connect\([\'"]([^\'"]+)[\'"]\)', content)
-            if match: return Path(match.group(1)).name
+            if match:
+                return Path(match.group(1)).name
         elif db_type == 'chromadb':
             match = re.search(r'path=[\'"]([^\'"]+)[\'"]', content)
-            if match: return Path(match.group(1)).name
+            if match:
+                return Path(match.group(1)).name
         elif db_type == 'postgres':
             match = re.search(r'dbname=([\'"]?)(\w+)\1', content)
-            if match: return match.group(2) if match.lastindex and match.lastindex >= 2 else match.group(1)
+            if match:
+                return match.group(2) if match.lastindex and match.lastindex >= 2 else match.group(1)
             match = re.search(r'database=([\'"]?)(\w+)\1', content)
-            if match: return match.group(2) if match.lastindex and match.lastindex >= 2 else match.group(1)
+            if match:
+                return match.group(2) if match.lastindex and match.lastindex >= 2 else match.group(1)
         elif db_type == 'mongodb':
             match = re.search(r'/(\w+)\?', content)
-            if match: return match.group(1)
+            if match:
+                return match.group(1)
         return None
 
     def _extract_queue_name(self, content: str, queue_type: str) -> Optional[str]:

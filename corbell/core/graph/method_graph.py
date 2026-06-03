@@ -416,8 +416,6 @@ class MethodGraphBuilder:
         target_node_types = _TS_TARGET_NODES.get(lang, set())
         call_site_types = _TS_CALL_SITE_NODES.get(lang, set())
         builtins = _BUILTIN_BLOCKLIST.get(lang, set())
-        lines = content.splitlines()
-
         def _node_name(node) -> Optional[str]:
             """Extract the identifier name from a function/method node."""
             # 1. Try matching identifier child that is exactly the "name" field

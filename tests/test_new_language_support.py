@@ -7,7 +7,6 @@ Tests follow the same patterns as test_method_graph_improvements.py.
 from __future__ import annotations
 
 import textwrap
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest

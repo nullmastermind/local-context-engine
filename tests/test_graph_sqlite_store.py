@@ -1,7 +1,5 @@
 """Tests for graph SQLite store."""
 
-from pathlib import Path
-
 import pytest
 
 from corbell.core.graph.schema import (

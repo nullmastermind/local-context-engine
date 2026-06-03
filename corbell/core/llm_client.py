@@ -456,7 +456,6 @@ class LLMClient:
         Requires: ``pip install "google-cloud-aiplatform>=1.38" anthropic[vertex]``
         """
         try:
-            import anthropic
             from anthropic import AnthropicVertex  # type: ignore[attr-defined]
         except (ImportError, AttributeError):
             raise ImportError(

@@ -8,7 +8,6 @@ Tree-sitter tests are marked to skip gracefully if grammars aren't installed.
 from __future__ import annotations
 
 import textwrap
-from pathlib import Path
 
 import pytest
 
