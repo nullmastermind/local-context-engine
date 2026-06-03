@@ -72,7 +72,7 @@ def codebase_retrieval(
     if chunk_count == 0:
         logger.info("Index is empty — running full build now (this may take a while)...")
         builder = IndexBuilder()
-        builder.build(cfg, db_path, rebuild=True)
+        builder.build(cfg, db_path, rebuild=True, progress_fn=lambda msg: logger.info(msg))
 
     stale_result = tracker.get_stale_files(cfg.repos, cfg)
     if stale_result.has_changes:
@@ -83,7 +83,7 @@ def codebase_retrieval(
         if age_seconds > one_day:
             # Stale + old → blocking incremental rebuild
             builder = IndexBuilder()
-            builder.build(cfg, db_path, rebuild=False)
+            builder.build(cfg, db_path, rebuild=False, progress_fn=lambda msg: logger.info(msg))
         else:
             # Stale + recent → background subprocess
             _spawn_background_worker(workspace_path, db_path)

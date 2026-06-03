@@ -60,7 +60,10 @@ def build(
     console.print(f"[bold]{mode}{target}[/bold] starting...")
 
     try:
-        result = builder.build(cfg, db_path, rebuild=rebuild, repo_filter=repo)
+        result = builder.build(
+            cfg, db_path, rebuild=rebuild, repo_filter=repo,
+            progress_fn=lambda msg: console.print(f"  {msg}"),
+        )
     except ValueError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1)

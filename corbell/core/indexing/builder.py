@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from corbell.core.gitignore import load_gitignore
 from corbell.core.indexing.tracker import IndexTracker
@@ -24,6 +24,7 @@ class IndexBuilder:
         db_path: Path,
         rebuild: bool = False,
         repo_filter: Optional[str] = None,
+        progress_fn: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
         """Build or incrementally update the code search index.
 
@@ -94,7 +95,7 @@ class IndexBuilder:
         if rebuild:
             return self._full_build(
                 repos, emb_store, graph_store, tracker, extractor, model,
-                indexing, model_name,
+                indexing, model_name, progress_fn=progress_fn,
             )
         else:
             stale = tracker.get_stale_files(repos, cfg)
@@ -104,6 +105,7 @@ class IndexBuilder:
             return self._incremental_build(
                 repos, stale, emb_store, graph_store, tracker,
                 extractor, model, cfg, indexing, model_name,
+                progress_fn=progress_fn,
             )
 
     def _full_build(
@@ -116,6 +118,7 @@ class IndexBuilder:
         model: Any,
         indexing: Any,
         model_name: str,
+        progress_fn: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
         """Run a full (re)build across all repos."""
         total_chunks = 0
@@ -148,6 +151,8 @@ class IndexBuilder:
                 max_file_bytes=indexing.max_file_bytes,
                 gitignore_spec=gitignore_spec,
             )
+            if progress_fn:
+                progress_fn(f"Indexing {repo_id} ({len(chunks)} chunks)...")
             if chunks:
                 from corbell.core.embeddings.model import GoogleEmbeddingModel
                 if isinstance(model, GoogleEmbeddingModel) and model.uses_prefix_format:
@@ -180,6 +185,8 @@ class IndexBuilder:
         # Build graph
         from corbell.core.graph.builder import ServiceGraphBuilder
         from corbell.core.graph.method_graph import MethodGraphBuilder
+        if progress_fn:
+            progress_fn("Building call graph...")
         sgb = ServiceGraphBuilder(graph_store)
         mgb = MethodGraphBuilder(graph_store)
         sgb.build_from_workspace(services_data, clear_existing=False, method_level=False)
@@ -210,6 +217,7 @@ class IndexBuilder:
         cfg: Any,
         indexing: Any,
         model_name: str,
+        progress_fn: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
         """Re-embed changed files and rebuild graph for affected repos."""
         from corbell.core.graph.builder import ServiceGraphBuilder
@@ -236,6 +244,8 @@ class IndexBuilder:
             if not repo or not repo.resolved_path:
                 continue
             repo_path = repo.resolved_path
+            if progress_fn:
+                progress_fn(f"Re-indexing {len(file_paths)} files in {repo_id}...")
 
             for rel_path in file_paths:
                 abs_path = repo_path / rel_path
@@ -282,6 +292,8 @@ class IndexBuilder:
         # Rebuild graph for affected repos
         sgb = ServiceGraphBuilder(graph_store)
         mgb = MethodGraphBuilder(graph_store)
+        if progress_fn:
+            progress_fn("Rebuilding call graph...")
 
         for repo_id in changed_repo_ids:
             repo = repo_map.get(repo_id)
