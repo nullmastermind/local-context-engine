@@ -19,6 +19,7 @@ def merge_and_dedup(chunks: List["ScoredChunk"]) -> List["ScoredChunk"]:
     2. Group chunks by file path.
     3. Within each file, sort by start_line and merge adjacent/overlapping chunks.
     4. Cap merged blocks at 100 lines.
+    5. Remove chunks whose line range is fully contained within another chunk in the same file.
 
     Args:
         chunks: List of ScoredChunk objects (may have duplicates from multiple queries).
@@ -46,6 +47,8 @@ def merge_and_dedup(chunks: List["ScoredChunk"]) -> List["ScoredChunk"]:
     result: List["ScoredChunk"] = []
     for file_path, file_chunks in by_file.items():
         merged = _merge_file_chunks(file_chunks)
+        # Step 5: Drop chunks fully contained within a larger chunk in the same file
+        merged = _drop_contained_ranges(merged)
         result.extend(merged)
 
     # Sort final result by score descending for output ordering
@@ -88,6 +91,41 @@ def _merge_file_chunks(chunks: List["ScoredChunk"]) -> List["ScoredChunk"]:
 
     merged.append(current)
     return merged
+
+
+def _drop_contained_ranges(chunks: List["ScoredChunk"]) -> List["ScoredChunk"]:
+    """Remove chunks whose line range is fully contained within another chunk's range.
+
+    A chunk B is considered contained in chunk A when:
+      A.start_line <= B.start_line and B.end_line <= A.end_line
+
+    When two chunks share the exact same range, the one with the lower score is dropped;
+    ties keep the first encountered (already deduped by chunk_id earlier).
+
+    The larger containing chunk already includes all information from the inner chunk,
+    so sending both to the reranker wastes tokens without adding signal.
+    """
+    if len(chunks) <= 1:
+        return chunks
+
+    # Sort by range width descending (widest first), break ties by score descending.
+    # This lets us efficiently check whether later (narrower) chunks are contained.
+    sorted_by_width = sorted(
+        chunks,
+        key=lambda c: (-(c.end_line - c.start_line), -c.score),
+    )
+
+    kept: List["ScoredChunk"] = []
+    for candidate in sorted_by_width:
+        contained = False
+        for keeper in kept:
+            if keeper.start_line <= candidate.start_line and candidate.end_line <= keeper.end_line:
+                contained = True
+                break
+        if not contained:
+            kept.append(candidate)
+
+    return kept
 
 
 def _merge_two(a: "ScoredChunk", b: "ScoredChunk") -> "ScoredChunk":

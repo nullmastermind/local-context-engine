@@ -59,10 +59,20 @@ def rerank_chunks(
         else:
             meta_str = f"score={chunk.score:.2f}"
 
+        content = chunk.content
+        content_lines = content.splitlines()
+        if len(content_lines) > 100:
+            truncated_count = len(content_lines) - 100
+            content = "\n".join(
+                content_lines[:50]
+                + [f"... ({truncated_count} lines truncated) ..."]
+                + content_lines[-50:]
+            )
+
         entry = (
             f"[{i}] {meta_str} | {chunk.file_path}:{chunk.start_line}-{chunk.end_line}"
             f" ({chunk.chunk_type}, {chunk.symbol or 'no symbol'})\n"
-            f"{chunk.content}"
+            f"{content}"
         )
         entries.append(entry)
 
