@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
 
 
 def codebase_retrieval(
@@ -23,18 +26,17 @@ def codebase_retrieval(
     1. Load workspace config and open stores.
     2. Auto-index check (empty → error, stale+old → blocking rebuild,
        stale+recent → background rebuild).
-    3. LLM query enhancement (or use raw query).
-    4. Embedding search via EmbeddingSearchCache.
-    5. Graph call-chain expansion.
-    6. Merge + dedup.
-    7. LLM rerank (optional).
-    8. Format results.
+    3. Embedding search via EmbeddingSearchCache (raw query used directly).
+    4. Graph call-chain expansion.
+    5. Merge + dedup.
+    6. LLM rerank (optional).
+    7. Format results.
 
     Args:
         query: Natural language query string.
         workspace_path: Path to workspace.yaml or its containing directory.
         top_k: Maximum number of chunks to pass to reranker.
-        use_llm: If False, skip LLM enhancement and reranking.
+        use_llm: If False, skip reranking.
         rerank: If False, skip reranking even when LLM is configured.
 
     Returns:
@@ -49,7 +51,6 @@ def codebase_retrieval(
     from corbell.core.indexing.builder import IndexBuilder
     from corbell.core.indexing.tracker import IndexTracker
     from corbell.core.query.diagnostics import QueryDiagnostics
-    from corbell.core.query.enhancer import enhance_query
     from corbell.core.query.graph_expander import ScoredChunk, expand_via_graph
     from corbell.core.query.merger import merge_and_dedup
     from corbell.core.query.reranker import rerank_chunks
@@ -104,8 +105,8 @@ def codebase_retrieval(
             gcp_region=llm_cfg.gcp_region,
         )
 
-    # --- Query enhancement ---
-    search_queries, _keywords = enhance_query(query, llm_client if use_llm else None)
+    # --- Search queries ---
+    search_queries = [query]
 
     # --- Embedding model ---
     model_name = cfg.storage.resolved_model()
@@ -211,7 +212,15 @@ def codebase_retrieval(
     # --- LLM rerank ---
     do_rerank = use_llm and rerank and query_config.rerank
     if do_rerank:
+        rerank_start = time.time()
         reranked_ids = rerank_chunks(query, merged, llm_client)
+        rerank_elapsed = time.time() - rerank_start
+        logger.info(
+            "Rerank complete: %.3fs, %d chunks reranked, order: %s",
+            rerank_elapsed,
+            len(merged),
+            reranked_ids,
+        )
         # Reorder merged by reranked_ids
         id_to_chunk = {c.chunk_id: c for c in merged}
         reranked = [id_to_chunk[cid] for cid in reranked_ids if cid in id_to_chunk]
