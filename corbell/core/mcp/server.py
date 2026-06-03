@@ -67,7 +67,7 @@ def context_engine_codebase_retrieval(
             )
 
         cfg = build_config(ws_path)
-        db_path = db_path_for_workspace(ws_path)
+        db_path = db_path_for_workspace(ws_path, model=cfg.storage.resolved_model())
 
         try:
             emb_store = SQLiteEmbeddingStore(db_path)
@@ -195,3 +195,20 @@ def serve(transport: str = "stdio", port: int = 8000) -> None:
                 )
 
         asyncio.run(_run())
+
+
+def main() -> None:
+    """Entry point for `uvx codebase-retrieval-context-engine`."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Codebase Retrieval Context Engine MCP Server")
+    parser.add_argument(
+        "--transport", "-t", default="stdio", choices=["stdio", "sse"],
+        help="Transport mode (default: stdio)",
+    )
+    parser.add_argument(
+        "--port", "-p", type=int, default=8000,
+        help="Port for SSE transport (default: 8000)",
+    )
+    args = parser.parse_args()
+    serve(transport=args.transport, port=args.port)

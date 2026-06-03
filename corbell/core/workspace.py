@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import List, Optional
 
@@ -176,14 +179,154 @@ def sanitize_path(workspace_path: Path) -> str:
     return sanitized
 
 
-def db_path_for_workspace(workspace_path: Path) -> Path:
-    """Return the SQLite DB path for a workspace.
+def resolve_embedding_dimension(model_name: str) -> int:
+    """Return the embedding vector dimension for *model_name*.
 
-    Stored at ``~/.vibervn/context-engine/{sanitized}/workspace.db``.
-    Creates parent directories automatically.
+    Resolution order:
+    1. ``CORBELL_EMBEDDING_DIM`` env var (if set)
+    2. Prefix-based rule for voyage-* and gemini-* models
+    3. Exact lookup in ``KNOWN_DIMS``
+    4. Default fallback of 384
+
+    Never loads an actual model — pure lookup only.
     """
+    dim_env = os.environ.get("CORBELL_EMBEDDING_DIM", "").strip()
+    if dim_env:
+        return int(dim_env)
+    if model_name.startswith("voyage-"):
+        return 1024
+    if model_name.startswith("gemini-"):
+        return 768
+    known_dims = {
+        "all-MiniLM-L6-v2": 384,
+        "all-MiniLM-L12-v2": 384,
+        "all-mpnet-base-v2": 768,
+    }
+    return known_dims.get(model_name, 384)
+
+
+def detect_git_branch(workspace_path: Path) -> str:
+    """Detect the current git branch for *workspace_path*.
+
+    Returns the branch name, ``"detached-<short-sha>"`` for detached HEAD,
+    or ``"_no_git"`` when git is unavailable or the directory is not a repo.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(workspace_path),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            branch = result.stdout.strip()
+            if branch and branch != "HEAD":
+                return branch
+            result2 = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=str(workspace_path),
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result2.returncode == 0:
+                return f"detached-{result2.stdout.strip()}"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return "_no_git"
+
+
+def _seed_from_sibling(base_dir: Path, target_namespace: str, model_dim_prefix: str) -> None:
+    """Copy the most-recently-modified sibling DB into *target_namespace* if it doesn't exist yet.
+
+    Looks for sibling directories under *base_dir* that share the same
+    ``model--dimension`` prefix but differ in branch name.  The most recent DB
+    is copied atomically (temp file + os.replace) so a crash mid-copy never
+    leaves a partial database file.
+
+    Args:
+        base_dir: Parent directory that contains per-namespace subdirectories.
+        target_namespace: The namespace directory name to seed (``model--dim--branch``).
+        model_dim_prefix: The ``model--dimension`` prefix used to identify siblings
+            (e.g. ``"all-MiniLM-L6-v2--384"``).  Passed explicitly to avoid
+            ambiguous parsing when branch names contain ``--``.
+    """
+    target_dir = base_dir / target_namespace
+    target_db = target_dir / "workspace.db"
+    if target_db.exists():
+        return
+
+    # Find sibling dirs with same model+dim but different branch
+    candidates = []
+    if base_dir.exists():
+        for d in base_dir.iterdir():
+            if not d.is_dir() or d.name == target_namespace:
+                continue
+            if not d.name.startswith(model_dim_prefix + "--"):
+                continue
+            db_file = d / "workspace.db"
+            if db_file.exists():
+                try:
+                    candidates.append((db_file.stat().st_mtime, db_file))
+                except OSError:
+                    continue
+
+    if not candidates:
+        return
+
+    candidates.sort(reverse=True)
+    best_db = candidates[0][1]
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # Atomic: write to temp file in same directory, then rename
+    fd, tmp_path = tempfile.mkstemp(dir=str(target_dir), suffix=".db.tmp")
+    try:
+        os.close(fd)
+        shutil.copy2(str(best_db), tmp_path)
+        os.replace(tmp_path, str(target_db))
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def db_path_for_workspace(workspace_path: Path, model: Optional[str] = None) -> Path:
+    """Return the SQLite DB path for a workspace, namespaced by model, dimension, and git branch.
+
+    Stored at ``~/.vibervn/context-engine/{sanitized}/{model}--{dim}--{branch}/workspace.db``.
+    Creates parent directories automatically.
+
+    The namespace isolates index data so switching embedding models, changing
+    vector dimensions, or checking out a different branch never corrupts an
+    existing index.  When a new branch namespace is first used, the most recent
+    sibling DB (same model+dim, different branch) is copied as a warm seed so
+    incremental indexing can pick up where it left off.
+
+    Args:
+        workspace_path: Path to the workspace root directory.
+        model: Embedding model name.  Falls back to ``CORBELL_EMBEDDING_MODEL``
+               env var, then ``"all-MiniLM-L6-v2"``.
+    """
+    model_name = model or os.environ.get("CORBELL_EMBEDDING_MODEL") or "all-MiniLM-L6-v2"
+    dimension = resolve_embedding_dimension(model_name)
+    branch = detect_git_branch(workspace_path)
+
+    sanitized_model = model_name.replace("/", "_").replace("\\", "_")
+    sanitized_branch = branch.replace("/", "_").replace("\\", "_")
+    model_dim_prefix = f"{sanitized_model}--{dimension}"
+    namespace = f"{model_dim_prefix}--{sanitized_branch}"
+
     name = sanitize_path(workspace_path)
-    db_dir = Path.home() / ".vibervn" / "context-engine" / name
+    base_dir = Path.home() / ".vibervn" / "context-engine" / name
+
+    # Seed from sibling branch if this is a new namespace
+    if not (base_dir / namespace / "workspace.db").exists():
+        _seed_from_sibling(base_dir, namespace, model_dim_prefix)
+
+    db_dir = base_dir / namespace
     db_dir.mkdir(parents=True, exist_ok=True)
     return db_dir / "workspace.db"
 

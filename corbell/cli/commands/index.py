@@ -50,7 +50,7 @@ def build(
         raise typer.Exit(1)
 
     cfg = build_config(ws_path)
-    db_path = db_path_for_workspace(ws_path)
+    db_path = db_path_for_workspace(ws_path, model=cfg.storage.resolved_model())
 
     from corbell.core.indexing.builder import IndexBuilder
     builder = IndexBuilder()

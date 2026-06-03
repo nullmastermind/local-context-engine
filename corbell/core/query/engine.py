@@ -59,7 +59,7 @@ def codebase_retrieval(
         return f"Error: Workspace directory not found: {workspace_path}. Run 'corbell index build' first."
 
     cfg = build_config(workspace_path)
-    db_path = db_path_for_workspace(workspace_path)
+    db_path = db_path_for_workspace(workspace_path, model=cfg.storage.resolved_model())
     emb_store = SQLiteEmbeddingStore(db_path)
     graph_store = SQLiteGraphStore(db_path)
     tracker = IndexTracker(db_path)
