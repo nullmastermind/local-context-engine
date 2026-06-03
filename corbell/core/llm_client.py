@@ -4,6 +4,7 @@ Supports local providers:
   - ``anthropic``  — requires ``anthropic>=0.25`` and ANTHROPIC_API_KEY
   - ``openai``     — requires ``openai>=1.0`` and OPENAI_API_KEY
   - ``ollama``     — requires a running Ollama server (http://localhost:11434)
+  - ``google``     — requires ``google-genai>=2.7.0`` and GOOGLE_API_KEY
 
 And cloud-hosted providers (for enterprise teams with existing cloud commitments):
   - ``aws``   — Anthropic Claude via AWS Bedrock (boto3 + AWS credentials)
@@ -34,6 +35,15 @@ class LLMClient:
           provider: anthropic
           model: claude-sonnet-4-5-20250929
           api_key: ${ANTHROPIC_API_KEY}
+
+    Google AI (Gemini):
+
+    .. code-block:: yaml
+
+        llm:
+          provider: google
+          model: gemini-2.5-flash
+          api_key: ${GOOGLE_API_KEY}
 
     **Cloud providers** (enterprise API keys from your cloud console):
 
@@ -89,7 +99,7 @@ class LLMClient:
         """Initialize the LLM client.
 
         Args:
-            provider: One of ``anthropic``, ``openai``, ``ollama``, ``aws``, ``azure``, ``gcp``.
+            provider: One of ``anthropic``, ``openai``, ``ollama``, ``google``, ``aws``, ``azure``, ``gcp``.
             model: Model identifier (see defaults per provider below).
             api_key: API key. If None, resolved from environment variables.
             token_tracker: Optional :class:`~corbell.core.token_tracker.TokenUsageTracker`.
@@ -117,6 +127,7 @@ class LLMClient:
             "anthropic": "claude-sonnet-4-5",
             "openai": "gpt-4o",
             "ollama": "llama3",
+            "google": "gemini-2.5-flash",
             # Cloud defaults — Claude Sonnet 4.5 on Bedrock / Vertex
             "aws": "us.anthropic.claude-sonnet-4-20250514-v1:0",
             "azure": "gpt-4o",
@@ -154,6 +165,7 @@ class LLMClient:
             "anthropic": lambda: self._call_anthropic(system_prompt, user_prompt, max_tokens, temperature, rt),
             "openai": lambda: self._call_openai(system_prompt, user_prompt, max_tokens, temperature, rt),
             "ollama": lambda: self._call_ollama(system_prompt, user_prompt, max_tokens),
+            "google": lambda: self._call_google_ai(system_prompt, user_prompt, max_tokens, temperature, rt),
             "aws": lambda: self._call_aws_bedrock(system_prompt, user_prompt, max_tokens, temperature, rt),
             "azure": lambda: self._call_azure_openai(system_prompt, user_prompt, max_tokens, temperature, rt),
             "gcp": lambda: self._call_gcp_vertex(system_prompt, user_prompt, max_tokens, temperature, rt),
@@ -203,6 +215,7 @@ class LLMClient:
             "anthropic": f"Anthropic ({self.model})",
             "openai": f"OpenAI ({self.model})",
             "ollama": f"Ollama/{self.model} (local)",
+            "google": f"Google AI ({self.model})",
             "aws": f"AWS Bedrock/{self.model} @ {self.aws_region}",
             "azure": f"Azure OpenAI/{self.model} ({self.azure_deployment or 'default'})",
             "gcp": f"GCP Vertex AI/{self.model} @ {self.gcp_region}",
@@ -286,6 +299,47 @@ class LLMClient:
         with urllib.request.urlopen(req, timeout=120) as resp:
             data = json.loads(resp.read())
         return data.get("message", {}).get("content", "")
+
+    def _call_google_ai(
+        self, system: str, user: str, max_tokens: int, temperature: float,
+        request_type: str = "call",
+    ) -> str:
+        """Call Google AI (Gemini) models via the google-genai SDK.
+
+        Requires ``pip install corbell[google]`` and ``GOOGLE_API_KEY``.
+
+        .. code-block:: yaml
+
+            llm:
+              provider: google
+              model: gemini-2.5-flash
+              api_key: ${GOOGLE_API_KEY}
+        """
+        try:
+            from google import genai
+            from google.genai import types
+        except ImportError:
+            raise ImportError("pip install corbell[google]")
+
+        client = genai.Client(api_key=self._api_key)
+        response = client.models.generate_content(
+            model=self.model,
+            contents=user,
+            config=types.GenerateContentConfig(
+                system_instruction=system,
+                max_output_tokens=max_tokens,
+                temperature=temperature,
+            ),
+        )
+
+        if self.token_tracker and response.usage_metadata:
+            self.token_tracker.record(
+                request_type, self.model,
+                response.usage_metadata.prompt_token_count or 0,
+                response.usage_metadata.candidates_token_count or 0,
+            )
+
+        return response.text
 
     # ------------------------------------------------------------------ #
     # Provider implementations — cloud                                     #
@@ -494,6 +548,7 @@ class LLMClient:
             "anthropic": ["ANTHROPIC_API_KEY", "CORBELL_LLM_API_KEY"],
             "openai": ["OPENAI_API_KEY", "CORBELL_LLM_API_KEY"],
             "azure": ["AZURE_OPENAI_API_KEY", "CORBELL_LLM_API_KEY"],
+            "google": ["GOOGLE_API_KEY", "CORBELL_LLM_API_KEY"],
             "ollama": [],
             "aws": [],   # Uses boto3 credential chain
             "gcp": [],   # Uses Google ADC
@@ -523,6 +578,7 @@ class LLMClient:
             "\n"
             "  Anthropic:   export ANTHROPIC_API_KEY=sk-ant-...\n"
             "  OpenAI:      export OPENAI_API_KEY=sk-...\n"
+            "  Google AI:   export GOOGLE_API_KEY=AIza...\n"
             "  AWS Bedrock: export BEDROCK_API_KEY=<your-long-term-key> AWS_REGION=us-east-1\n"
             "               (or IAM): export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...\n"
             "  Azure:       export AZURE_OPENAI_API_KEY=... AZURE_OPENAI_ENDPOINT=https://...\n"

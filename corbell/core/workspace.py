@@ -96,6 +96,7 @@ class LLMConfig(BaseModel):
             "openai": "OPENAI_API_KEY",
             "anthropic": "ANTHROPIC_API_KEY",
             "azure": "AZURE_OPENAI_API_KEY",
+            "google": "GOOGLE_API_KEY",
             "ollama": None,
         }
         env_var = env_map.get(self.provider.lower(), "CORBELL_LLM_API_KEY")

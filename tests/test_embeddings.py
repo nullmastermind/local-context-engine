@@ -1,5 +1,9 @@
 """Tests for code chunk extractor and embedding store."""
 
+import sys
+from types import ModuleType
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from corbell.core.embeddings.extractor import CodeChunkExtractor, EmbeddingRecord
@@ -175,3 +179,115 @@ def test_get_chunks_by_ids_missing(emb_store):
     emb_store.upsert(_make_record(0))
     result = emb_store.get_chunks_by_ids(["nonexistent::id"])
     assert result == []
+
+
+# ─── GoogleEmbeddingModel tests ──────────────────────────────────────────────
+
+def _make_google_mocks(num_texts: int = 2):
+    """Build minimal google.genai / types mocks for embedding tests."""
+    embeddings = []
+    for i in range(num_texts):
+        emb = MagicMock()
+        emb.values = [float(i) * 0.1] * 768
+        embeddings.append(emb)
+
+    result_mock = MagicMock()
+    result_mock.embeddings = embeddings
+
+    models_mock = MagicMock()
+    models_mock.embed_content.return_value = result_mock
+
+    client_instance = MagicMock()
+    client_instance.models = models_mock
+
+    genai_mod = MagicMock()
+    genai_mod.Client.return_value = client_instance
+
+    types_mod = MagicMock()
+    types_mod.EmbedContentConfig = MagicMock(return_value=MagicMock())
+
+    return genai_mod, types_mod, models_mock
+
+
+def test_google_embedding_model_encode():
+    """encode() returns one vector per input text."""
+    from corbell.core.embeddings.model import GoogleEmbeddingModel
+
+    texts = ["hello", "world"]
+    genai_mod, types_mod, models_mock = _make_google_mocks(num_texts=len(texts))
+
+    google_pkg = ModuleType("google")
+    google_pkg.genai = genai_mod
+    genai_pkg = ModuleType("google.genai")
+    genai_pkg.types = types_mod
+
+    with patch.dict(sys.modules, {
+        "google": google_pkg,
+        "google.genai": genai_pkg,
+        "google.genai.types": types_mod,
+    }):
+        model = GoogleEmbeddingModel(api_key="test-key")
+        result = model.encode(texts)
+
+    assert len(result) == len(texts)
+
+
+def test_google_embedding_model_dimension():
+    """dimension property returns 768."""
+    from corbell.core.embeddings.model import GoogleEmbeddingModel
+    model = GoogleEmbeddingModel()
+    assert model.dimension == 768
+
+
+def test_google_embedding_model_default_name():
+    """Default model name is gemini-embedding-001."""
+    from corbell.core.embeddings.model import GoogleEmbeddingModel
+    model = GoogleEmbeddingModel()
+    assert model.model_name == "gemini-embedding-001"
+
+
+def test_google_embedding_model_task_type_forwarded():
+    """task_type is forwarded to embed_content config."""
+    from corbell.core.embeddings.model import GoogleEmbeddingModel
+
+    texts = ["query text"]
+    genai_mod, types_mod, models_mock = _make_google_mocks(num_texts=len(texts))
+
+    google_pkg = ModuleType("google")
+    google_pkg.genai = genai_mod
+    genai_pkg = ModuleType("google.genai")
+    genai_pkg.types = types_mod
+
+    with patch.dict(sys.modules, {
+        "google": google_pkg,
+        "google.genai": genai_pkg,
+        "google.genai.types": types_mod,
+    }):
+        model = GoogleEmbeddingModel(api_key="test-key")
+        model.encode(texts, task_type="RETRIEVAL_QUERY")
+
+    # Verify EmbedContentConfig was called with the right task_type
+    types_mod.EmbedContentConfig.assert_called_once_with(
+        task_type="RETRIEVAL_QUERY",
+        output_dimensionality=768,
+    )
+
+
+def test_google_embedding_model_api_key_from_env(monkeypatch):
+    """api_key is resolved from GOOGLE_API_KEY env var."""
+    from corbell.core.embeddings.model import GoogleEmbeddingModel
+
+    monkeypatch.setenv("GOOGLE_API_KEY", "env-google-key")
+    model = GoogleEmbeddingModel()
+    assert model._api_key == "env-google-key"
+
+
+def test_google_embedding_model_import_error():
+    """ImportError raised when google-genai is not installed."""
+    from corbell.core.embeddings.model import GoogleEmbeddingModel
+
+    model = GoogleEmbeddingModel(api_key="test-key")
+
+    with patch.dict(sys.modules, {"google": None, "google.genai": None}):
+        with pytest.raises(ImportError, match="pip install corbell\\[google\\]"):
+            model.encode(["text"])

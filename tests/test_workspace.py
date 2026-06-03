@@ -176,3 +176,21 @@ indexing:
     assert cfg.indexing.chunk_size == 100
     assert cfg.indexing.chunk_overlap == 20
     assert cfg.indexing.max_file_bytes == 512000
+
+
+def test_llm_config_resolved_api_key_google(tmp_path, monkeypatch):
+    monkeypatch.setenv("GOOGLE_API_KEY", "sk-google-test")
+    config_dir = tmp_path / "corbell"
+    config_dir.mkdir()
+    ws = config_dir / "workspace.yaml"
+    ws.write_text("""\
+version: "1"
+workspace:
+  name: test
+repos: []
+llm:
+  provider: google
+  model: gemini-2.5-flash
+""")
+    cfg = load_workspace(ws)
+    assert cfg.llm.resolved_api_key() == "sk-google-test"

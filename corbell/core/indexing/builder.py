@@ -39,7 +39,7 @@ class IndexBuilder:
             ValueError: If the embedding model has changed and --rebuild is not set.
         """
         from corbell.core.embeddings.extractor import CodeChunkExtractor
-        from corbell.core.embeddings.model import SentenceTransformerModel
+        from corbell.core.embeddings.model import SentenceTransformerModel, GoogleEmbeddingModel
         from corbell.core.embeddings.sqlite_store import SQLiteEmbeddingStore
         from corbell.core.graph.sqlite_store import SQLiteGraphStore
 
@@ -85,7 +85,10 @@ class IndexBuilder:
             chunk_size=indexing.chunk_size,
             overlap=indexing.chunk_overlap,
         )
-        model = SentenceTransformerModel(model_name)
+        if model_name.startswith("gemini-"):
+            model = GoogleEmbeddingModel(model_name)
+        else:
+            model = SentenceTransformerModel(model_name)
 
         if rebuild:
             return self._full_build(

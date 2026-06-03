@@ -44,7 +44,7 @@ def codebase_retrieval(
     from corbell.core.workspace import load_workspace
     from corbell.core.embeddings.sqlite_store import SQLiteEmbeddingStore
     from corbell.core.embeddings.search_cache import EmbeddingSearchCache
-    from corbell.core.embeddings.model import SentenceTransformerModel
+    from corbell.core.embeddings.model import SentenceTransformerModel, GoogleEmbeddingModel
     from corbell.core.graph.sqlite_store import SQLiteGraphStore
     from corbell.core.indexing.builder import IndexBuilder
     from corbell.core.indexing.tracker import IndexTracker
@@ -109,7 +109,10 @@ def codebase_retrieval(
 
     # --- Embedding model ---
     model_name = cfg.storage.model
-    emb_model = SentenceTransformerModel(model_name)
+    if model_name.startswith("gemini-"):
+        emb_model = GoogleEmbeddingModel(model_name)
+    else:
+        emb_model = SentenceTransformerModel(model_name)
 
     # --- Load search cache ---
     cache = EmbeddingSearchCache()
@@ -126,7 +129,10 @@ def codebase_retrieval(
 
     for sq in search_queries:
         try:
-            q_vecs = emb_model.encode([sq])
+            if isinstance(emb_model, GoogleEmbeddingModel):
+                q_vecs = emb_model.encode([sq], task_type="RETRIEVAL_QUERY")
+            else:
+                q_vecs = emb_model.encode([sq])
         except Exception as exc:
             return f"Error: Failed to load embedding model '{model_name}'. Ensure 'sentence-transformers' is installed. ({exc})"
 
