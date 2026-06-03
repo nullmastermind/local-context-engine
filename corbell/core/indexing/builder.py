@@ -41,7 +41,9 @@ class IndexBuilder:
             ValueError: If the embedding model has changed and --rebuild is not set.
         """
         from corbell.core.embeddings.extractor import CodeChunkExtractor
-        from corbell.core.embeddings.model import SentenceTransformerModel, GoogleEmbeddingModel, EmbeddingModel
+        from corbell.core.embeddings.model import (
+            SentenceTransformerModel, GoogleEmbeddingModel, VoyageEmbeddingModel, EmbeddingModel,
+        )
         from corbell.core.embeddings.sqlite_store import SQLiteEmbeddingStore
         from corbell.core.graph.sqlite_store import SQLiteGraphStore
 
@@ -89,6 +91,8 @@ class IndexBuilder:
         model: EmbeddingModel
         if model_name.startswith("gemini-"):
             model = GoogleEmbeddingModel(model_name)
+        elif model_name.startswith("voyage-"):
+            model = VoyageEmbeddingModel(model_name)
         else:
             model = SentenceTransformerModel(model_name)
 
@@ -154,7 +158,7 @@ class IndexBuilder:
             if progress_fn:
                 progress_fn(f"Indexing {repo_id} ({len(chunks)} chunks)...")
             if chunks:
-                from corbell.core.embeddings.model import GoogleEmbeddingModel
+                from corbell.core.embeddings.model import GoogleEmbeddingModel, VoyageEmbeddingModel
                 if isinstance(model, GoogleEmbeddingModel) and model.uses_prefix_format:
                     texts = [
                         model.prepare_document(
@@ -165,6 +169,8 @@ class IndexBuilder:
                         )
                         for c in chunks
                     ]
+                elif isinstance(model, VoyageEmbeddingModel):
+                    texts = [c.content for c in chunks]
                 else:
                     texts = [c.content for c in chunks]
                 vectors = model.encode(texts)
@@ -261,7 +267,7 @@ class IndexBuilder:
                 chunks = extractor._extract_file(abs_path, rel_path, lang, repo_id, str(repo_path))
 
                 if chunks:
-                    from corbell.core.embeddings.model import GoogleEmbeddingModel
+                    from corbell.core.embeddings.model import GoogleEmbeddingModel, VoyageEmbeddingModel
                     if isinstance(model, GoogleEmbeddingModel) and model.uses_prefix_format:
                         texts = [
                             model.prepare_document(
@@ -272,6 +278,8 @@ class IndexBuilder:
                             )
                             for c in chunks
                         ]
+                    elif isinstance(model, VoyageEmbeddingModel):
+                        texts = [c.content for c in chunks]
                     else:
                         texts = [c.content for c in chunks]
                     vectors = model.encode(texts)

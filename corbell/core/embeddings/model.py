@@ -59,6 +59,16 @@ class SentenceTransformerModel(EmbeddingModel):
         return self._get_model().get_sentence_embedding_dimension()
 
 
+def _is_voyage_rate_limit_error(e: Exception) -> bool:
+    """Return True when a Voyage API error is a 429 rate limit."""
+    status = getattr(e, "status_code", None)
+    if status == 429:
+        return True
+    # Some Voyage SDK versions use a different attribute
+    code = getattr(e, "code", None)
+    return code == 429
+
+
 def _is_google_key_error(e: Exception) -> bool:
     """Return True when a Google API error is caused by the key, not the request."""
     code = getattr(e, "code", None)
@@ -224,7 +234,7 @@ class GoogleEmbeddingModel(EmbeddingModel):
                         contents=contents,
                         config=types.EmbedContentConfig(
                             task_type=task_type,
-                            output_dimensionality=768,
+                            output_dimensionality=self.dimension,
                         ),
                     )
                     self._key_index = (idx + 1) % len(self._api_keys)
@@ -258,4 +268,134 @@ class GoogleEmbeddingModel(EmbeddingModel):
 
     @property
     def dimension(self) -> int:
+        dim_env = os.environ.get("CORBELL_EMBEDDING_DIM", "").strip()
+        if dim_env:
+            return int(dim_env)
         return 768
+
+
+class VoyageEmbeddingModel(EmbeddingModel):
+    """Voyage AI embedding model via the voyageai SDK.
+
+    Uses ``voyage-code-3`` by default (1024-dim, optimized for code retrieval).
+    Requires ``pip install corbell[voyage]`` and ``VOYAGE_API_KEY``.
+
+    Supports a comma-separated list of API keys for round-robin distribution
+    and automatic failover when a key is quota-exhausted.
+
+    The ``input_type`` parameter improves retrieval quality:
+    - ``"document"`` for indexing (default)
+    - ``"query"`` for query-time encoding
+
+    Use ``prepare_query`` and ``prepare_document`` which return the text unchanged
+    (Voyage handles task differentiation via ``input_type``).
+    """
+
+    _BATCH_SIZE = 1000
+    _BASE_DELAY = 2.0
+    _MAX_BACKOFF = 60.0
+
+    def __init__(self, model_name: str = "voyage-code-3", api_key: Optional[str] = None):
+        self.model_name = model_name
+        raw = api_key or os.environ.get("VOYAGE_API_KEY") or ""
+        self._api_keys: List[str] = [k.strip() for k in raw.split(",") if k.strip()]
+        if not self._api_keys:
+            raise ValueError(
+                "VOYAGE_API_KEY is not set. "
+                "Set it in your environment or workspace.yaml:\n"
+                "  export VOYAGE_API_KEY=pa-...\n"
+                "Or use a local embedding model (e.g. all-MiniLM-L6-v2) in storage.model."
+            )
+        self._key_index: int = random.randrange(len(self._api_keys))
+        # kept for backwards-compat with tests that read _api_key directly
+        self._api_key: str = self._api_keys[0]
+
+    def prepare_query(self, query: str) -> str:
+        """Return query unchanged; Voyage handles task differentiation via input_type."""
+        return query
+
+    def prepare_document(self, content: str, title: Optional[str] = None) -> str:
+        """Return content unchanged; Voyage handles task differentiation via input_type."""
+        return content
+
+    def encode(self, texts: List[str], input_type: str = "document") -> List[List[float]]:
+        """Encode a list of texts into embedding vectors.
+
+        Batches requests (1000 texts/batch) and retries on rate limit (429)
+        with exponential backoff.
+
+        Args:
+            texts: List of text strings to encode.
+            input_type: Voyage input type hint. Use ``"document"`` when indexing,
+                ``"query"`` at query time.
+
+        Returns:
+            List of float vectors (one per input text).
+        """
+        try:
+            import voyageai
+        except ImportError:
+            raise ImportError("pip install corbell[voyage]")
+
+        all_embeddings: List[List[float]] = []
+        for batch_start in range(0, len(texts), self._BATCH_SIZE):
+            batch = texts[batch_start:batch_start + self._BATCH_SIZE]
+            batch_result = self._embed_batch_with_retry(batch, input_type, voyageai)
+            all_embeddings.extend(batch_result)
+
+        return all_embeddings
+
+    def _embed_batch_with_retry(
+        self, batch: List[str], input_type: str, voyageai
+    ) -> List[List[float]]:
+        """Embed a single batch, rotating keys and retrying on rate limit.
+
+        - If all keys fail with 429 (rate limit), waits with capped exponential
+          backoff and retries indefinitely until the quota is restored.
+        - If any key fails with a non-rate-limit error, raises immediately.
+        """
+        import time
+
+        start = self._key_index
+        rate_limit_attempt = 0
+
+        while True:
+            errors: List[str] = []
+
+            for i in range(len(self._api_keys)):
+                idx = (start + i) % len(self._api_keys)
+                key = self._api_keys[idx]
+                try:
+                    vo = voyageai.Client(api_key=key)
+                    result = vo.embed(
+                        batch,
+                        model=self.model_name,
+                        input_type=input_type,
+                        output_dimension=self.dimension,
+                    )
+                    self._key_index = (idx + 1) % len(self._api_keys)
+                    return result.embeddings
+                except Exception as e:
+                    if _is_voyage_rate_limit_error(e):
+                        errors.append(f"key[{idx}]: {e}")
+                        continue
+                    raise
+
+            # All keys are rate-limited (429) — wait and retry indefinitely
+            delay = min(self._BASE_DELAY * (2 ** rate_limit_attempt), self._MAX_BACKOFF)
+            rate_limit_attempt += 1
+            logger.warning(
+                "All %d Voyage API key(s) rate-limited (429). "
+                "Retrying in %.0fs (attempt %d)...",
+                len(self._api_keys),
+                delay,
+                rate_limit_attempt,
+            )
+            time.sleep(delay)
+
+    @property
+    def dimension(self) -> int:
+        dim_env = os.environ.get("CORBELL_EMBEDDING_DIM", "").strip()
+        if dim_env:
+            return int(dim_env)
+        return 1024

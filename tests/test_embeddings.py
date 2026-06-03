@@ -480,3 +480,230 @@ def test_google_embedding_nonkey_400_propagates():
 
     # Only one attempt — embed_content called once
     assert models_mock.embed_content.call_count == 1
+
+
+# ─── VoyageEmbeddingModel tests ──────────────────────────────────────────────
+
+def _make_voyage_mocks(num_texts: int = 2):
+    """Build minimal voyageai Client mock for embedding tests."""
+    embeddings = [[float(i) * 0.1] * 1024 for i in range(num_texts)]
+
+    result_mock = MagicMock()
+    result_mock.embeddings = embeddings
+
+    client_instance = MagicMock()
+    client_instance.embed.return_value = result_mock
+
+    voyage_mod = MagicMock()
+    voyage_mod.Client.return_value = client_instance
+
+    return voyage_mod, client_instance
+
+
+def test_voyage_embedding_model_dimension():
+    """dimension property returns 1024 by default."""
+    from corbell.core.embeddings.model import VoyageEmbeddingModel
+
+    model = VoyageEmbeddingModel(api_key="test-key")
+    assert model.dimension == 1024
+
+
+def test_voyage_embedding_model_dimension_env_override(monkeypatch):
+    """dimension property reads CORBELL_EMBEDDING_DIM env var."""
+    from corbell.core.embeddings.model import VoyageEmbeddingModel
+
+    monkeypatch.setenv("CORBELL_EMBEDDING_DIM", "512")
+    model = VoyageEmbeddingModel(api_key="test-key")
+    assert model.dimension == 512
+
+
+def test_voyage_embedding_model_default_name():
+    """Default model name is voyage-code-3."""
+    from corbell.core.embeddings.model import VoyageEmbeddingModel
+
+    model = VoyageEmbeddingModel(api_key="test-key")
+    assert model.model_name == "voyage-code-3"
+
+
+def test_voyage_embedding_model_encode():
+    """encode() returns one vector per input text."""
+    from corbell.core.embeddings.model import VoyageEmbeddingModel
+
+    texts = ["hello", "world"]
+    voyage_mod, client_instance = _make_voyage_mocks(num_texts=len(texts))
+
+    with patch.dict(sys.modules, {"voyageai": voyage_mod}):
+        model = VoyageEmbeddingModel(api_key="test-key")
+        result = model.encode(texts)
+
+    assert len(result) == len(texts)
+    assert len(result[0]) == 1024
+
+
+def test_voyage_embedding_model_input_type_forwarded():
+    """input_type is forwarded to Client.embed."""
+    from corbell.core.embeddings.model import VoyageEmbeddingModel
+
+    texts = ["query text"]
+    voyage_mod, client_instance = _make_voyage_mocks(num_texts=len(texts))
+
+    with patch.dict(sys.modules, {"voyageai": voyage_mod}):
+        model = VoyageEmbeddingModel(api_key="test-key")
+        model.encode(texts, input_type="query")
+
+    client_instance.embed.assert_called_once()
+    call_kwargs = client_instance.embed.call_args
+    assert call_kwargs.kwargs.get("input_type") == "query" or call_kwargs.args[1] == "query" \
+        or "query" in str(call_kwargs)
+
+
+def test_voyage_embedding_model_input_type_forwarded_kwargs():
+    """input_type='query' is forwarded correctly via kwargs."""
+    from corbell.core.embeddings.model import VoyageEmbeddingModel
+
+    texts = ["query text"]
+    voyage_mod, client_instance = _make_voyage_mocks(num_texts=len(texts))
+
+    with patch.dict(sys.modules, {"voyageai": voyage_mod}):
+        model = VoyageEmbeddingModel(api_key="test-key")
+        model.encode(texts, input_type="query")
+
+    _, kwargs = client_instance.embed.call_args
+    assert kwargs.get("input_type") == "query"
+
+
+def test_voyage_embedding_model_api_key_from_env(monkeypatch):
+    """api_key is resolved from VOYAGE_API_KEY env var."""
+    from corbell.core.embeddings.model import VoyageEmbeddingModel
+
+    monkeypatch.setenv("VOYAGE_API_KEY", "env-voyage-key")
+    model = VoyageEmbeddingModel()
+    assert model._api_key == "env-voyage-key"
+
+
+def test_voyage_embedding_model_import_error():
+    """ImportError raised when voyageai is not installed."""
+    from corbell.core.embeddings.model import VoyageEmbeddingModel
+
+    model = VoyageEmbeddingModel(api_key="test-key")
+
+    with patch.dict(sys.modules, {"voyageai": None}):
+        with pytest.raises(ImportError, match="pip install corbell\\[voyage\\]"):
+            model.encode(["text"])
+
+
+def test_voyage_embedding_model_no_key_raises():
+    """ValueError raised when no API key is provided."""
+    from corbell.core.embeddings.model import VoyageEmbeddingModel
+    import os
+
+    # ensure env var is not set
+    env_backup = os.environ.pop("VOYAGE_API_KEY", None)
+    try:
+        with pytest.raises(ValueError, match="VOYAGE_API_KEY"):
+            VoyageEmbeddingModel()
+    finally:
+        if env_backup is not None:
+            os.environ["VOYAGE_API_KEY"] = env_backup
+
+
+# ─── VoyageEmbeddingModel multi-key tests ───────────────────────────────────
+
+def test_voyage_embedding_multikey_parses_csv():
+    """Constructor parses comma-separated keys into _api_keys list."""
+    from corbell.core.embeddings.model import VoyageEmbeddingModel
+
+    model = VoyageEmbeddingModel(api_key="key1, key2 , key3")
+    assert model._api_keys == ["key1", "key2", "key3"]
+
+
+def test_voyage_embedding_multikey_parses_env(monkeypatch):
+    """Constructor parses CSV from VOYAGE_API_KEY env var."""
+    from corbell.core.embeddings.model import VoyageEmbeddingModel
+
+    monkeypatch.setenv("VOYAGE_API_KEY", "pa-key1,pa-key2")
+    model = VoyageEmbeddingModel()
+    assert model._api_keys == ["pa-key1", "pa-key2"]
+
+
+def test_voyage_embedding_multikey_roundrobin():
+    """_key_index advances after a successful encode call."""
+    from corbell.core.embeddings.model import VoyageEmbeddingModel
+
+    voyage_mod, _ = _make_voyage_mocks(num_texts=1)
+
+    with patch.dict(sys.modules, {"voyageai": voyage_mod}):
+        model = VoyageEmbeddingModel(api_key="key0,key1,key2")
+        assert model._key_index == 0
+        model.encode(["text"])
+        assert model._key_index == 1
+        model.encode(["text"])
+        assert model._key_index == 2
+        model.encode(["text"])
+        assert model._key_index == 0  # wraps
+
+
+def test_voyage_embedding_multikey_failover():
+    """On rate limit for key[0], retries with key[1] and succeeds."""
+    from corbell.core.embeddings.model import VoyageEmbeddingModel
+
+    embeddings = [[0.1] * 1024]
+    result_mock = MagicMock()
+    result_mock.embeddings = embeddings
+
+    rate_err = Exception("rate limited")
+    rate_err.status_code = 429
+
+    call_count = {"n": 0}
+
+    def fake_embed(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise rate_err
+        return result_mock
+
+    client_instance = MagicMock()
+    client_instance.embed.side_effect = fake_embed
+
+    voyage_mod = MagicMock()
+    voyage_mod.Client.return_value = client_instance
+
+    with patch.dict(sys.modules, {"voyageai": voyage_mod}):
+        model = VoyageEmbeddingModel(api_key="slow-key,fast-key")
+        result = model.encode(["text"])
+
+    assert len(result) == 1
+    assert model._key_index == 0  # key[1] succeeded → next is key[0] (wraps from idx=1)
+
+
+def test_voyage_embedding_retry_on_429():
+    """All keys rate-limited triggers exponential backoff and eventual success."""
+    from corbell.core.embeddings.model import VoyageEmbeddingModel
+
+    embeddings = [[0.1] * 1024]
+    result_mock = MagicMock()
+    result_mock.embeddings = embeddings
+
+    rate_err = Exception("quota exhausted")
+    rate_err.status_code = 429
+
+    call_count = {"n": 0}
+
+    def fake_embed(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] < 3:  # fail twice then succeed
+            raise rate_err
+        return result_mock
+
+    client_instance = MagicMock()
+    client_instance.embed.side_effect = fake_embed
+
+    voyage_mod = MagicMock()
+    voyage_mod.Client.return_value = client_instance
+
+    with patch.dict(sys.modules, {"voyageai": voyage_mod}):
+        with patch("time.sleep"):  # avoid actual sleeps in tests
+            model = VoyageEmbeddingModel(api_key="only-key")
+            result = model.encode(["text"])
+
+    assert len(result) == 1

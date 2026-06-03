@@ -46,7 +46,7 @@ def codebase_retrieval(
     from corbell.core.workspace import build_config, db_path_for_workspace
     from corbell.core.embeddings.sqlite_store import SQLiteEmbeddingStore
     from corbell.core.embeddings.search_cache import EmbeddingSearchCache
-    from corbell.core.embeddings.model import SentenceTransformerModel, GoogleEmbeddingModel, EmbeddingModel
+    from corbell.core.embeddings.model import SentenceTransformerModel, GoogleEmbeddingModel, VoyageEmbeddingModel, EmbeddingModel
     from corbell.core.graph.sqlite_store import SQLiteGraphStore
     from corbell.core.indexing.builder import IndexBuilder
     from corbell.core.indexing.tracker import IndexTracker
@@ -113,6 +113,8 @@ def codebase_retrieval(
     emb_model: EmbeddingModel
     if model_name.startswith("gemini-"):
         emb_model = GoogleEmbeddingModel(model_name)
+    elif model_name.startswith("voyage-"):
+        emb_model = VoyageEmbeddingModel(model_name)
     else:
         emb_model = SentenceTransformerModel(model_name)
 
@@ -134,6 +136,8 @@ def codebase_retrieval(
             if isinstance(emb_model, GoogleEmbeddingModel):
                 formatted_query = emb_model.prepare_query(sq) if emb_model.uses_prefix_format else sq
                 q_vecs = emb_model.encode([formatted_query], task_type="RETRIEVAL_QUERY")
+            elif isinstance(emb_model, VoyageEmbeddingModel):
+                q_vecs = emb_model.encode([sq], input_type="query")
             else:
                 q_vecs = emb_model.encode([sq])
         except Exception as exc:
