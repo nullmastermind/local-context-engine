@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import subprocess
-import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -24,8 +21,8 @@ def codebase_retrieval(
 
     Pipeline:
     1. Load workspace config and open stores.
-    2. Auto-index check (empty → error, stale+old → blocking rebuild,
-       stale+recent → background rebuild).
+    2. Auto-index check (empty → full build, stale → blocking incremental rebuild).
+       Skipped entirely when last build completed within the past 30 seconds.
     3. Embedding search via EmbeddingSearchCache (raw query used directly).
     4. Graph call-chain expansion.
     5. Merge + dedup.
@@ -74,19 +71,14 @@ def codebase_retrieval(
         builder = IndexBuilder()
         builder.build(cfg, db_path, rebuild=True, progress_fn=lambda msg: logger.info(msg))
 
-    stale_result = tracker.get_stale_files(cfg.repos, cfg)
-    if stale_result.has_changes:
-        last_build = tracker.get_last_build_at()
-        age_seconds = time.time() - (last_build or 0)
-        one_day = 86400
-
-        if age_seconds > one_day:
-            # Stale + old → blocking incremental rebuild
+    # Short-circuit: skip stale check if a build finished within the last 30 seconds
+    last_build = tracker.get_last_build_at()
+    if last_build is None or (time.time() - last_build) >= 30:
+        stale_result = tracker.get_stale_files(cfg.repos, cfg)
+        if stale_result.has_changes:
+            # Always do a blocking incremental rebuild when stale
             builder = IndexBuilder()
             builder.build(cfg, db_path, rebuild=False, progress_fn=lambda msg: logger.info(msg))
-        else:
-            # Stale + recent → background subprocess
-            _spawn_background_worker(workspace_path, db_path)
 
     # --- LLM client setup ---
     llm_client: Optional[Any] = None
@@ -327,52 +319,3 @@ def _annotate_with_graph_meta(
         }
 
     return graph_meta
-
-
-def _spawn_background_worker(
-    workspace_path: Path,
-    db_path: Path,
-) -> None:
-    """Spawn a background subprocess for incremental index rebuild.
-
-    Uses PID file deduplication to prevent double-spawning.
-    """
-    pid_file = db_path.parent / "index.pid"
-
-    # Check if a worker is already running
-    if pid_file.exists():
-        try:
-            pid = int(pid_file.read_text().strip())
-            # Check if process is alive
-            if _is_process_alive(pid):
-                return  # worker already running
-        except (ValueError, OSError):
-            pass
-        # Stale PID file — remove it
-        try:
-            pid_file.unlink()
-        except OSError:
-            pass
-
-    # Spawn background worker
-    try:
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "corbell.core.indexing._worker", str(workspace_path)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        pid_file.write_text(str(proc.pid))
-    except Exception:
-        pass  # Background worker failure is non-fatal
-
-
-def _is_process_alive(pid: int) -> bool:
-    """Check if a process with the given PID is still running."""
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-        return True
-    except (OSError, ProcessLookupError):
-        return False

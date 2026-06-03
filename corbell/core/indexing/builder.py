@@ -2,12 +2,169 @@
 
 from __future__ import annotations
 
+import os
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from corbell.core.gitignore import load_gitignore
 from corbell.core.indexing.tracker import IndexTracker
+
+
+# --------------------------------------------------------------------------- #
+# Module-level worker function (must be picklable for multiprocessing)        #
+# --------------------------------------------------------------------------- #
+
+def _extract_file_worker(
+    args: Tuple,
+) -> List[Any]:
+    """Extract embedding chunks from a single file.
+
+    This is a module-level function so it can be pickled by ProcessPoolExecutor.
+
+    Args:
+        args: Tuple of
+            (abs_path_str, rel_path, lang, service_id, repo_str,
+             chunk_size, overlap, max_file_bytes)
+
+    Returns:
+        List of EmbeddingRecord objects (embeddings are None at this stage).
+    """
+    (
+        abs_path_str,
+        rel_path,
+        lang,
+        service_id,
+        repo_str,
+        chunk_size,
+        overlap,
+        max_file_bytes,  # noqa: F841 — kept for signature completeness
+    ) = args
+
+    from corbell.core.embeddings.extractor import CodeChunkExtractor
+
+    extractor = CodeChunkExtractor(chunk_size=chunk_size, overlap=overlap)
+    fp = Path(abs_path_str)
+    return extractor._extract_file(fp, rel_path, lang, service_id, repo_str)
+
+
+def _get_worker_count() -> int:
+    """Return the number of parallel workers for indexing.
+
+    Reads ``CORBELL_INDEX_WORKERS`` env var; defaults to ``min(cpu_count, 8)``.
+    """
+    env_val = os.environ.get("CORBELL_INDEX_WORKERS", "").strip()
+    if env_val:
+        try:
+            return max(1, int(env_val))
+        except ValueError:
+            pass
+    return min(os.cpu_count() or 4, 8)
+
+
+# --------------------------------------------------------------------------- #
+# Batch encoding helpers                                                       #
+# --------------------------------------------------------------------------- #
+
+_API_BATCH_SIZE = 100  # conservative limit for API-backed embedding models
+
+
+def _encode_chunks(model: Any, chunks: List[Any]) -> List[Any]:
+    """Encode chunks and attach embeddings in-place.
+
+    SentenceTransformerModel handles its own internal batching efficiently —
+    we pass the full list.  For API-backed models (Google, Voyage) we batch
+    into groups of ``_API_BATCH_SIZE`` to stay within rate limits.
+
+    Args:
+        model: An EmbeddingModel instance.
+        chunks: List of EmbeddingRecord objects without embeddings.
+
+    Returns:
+        The same list with ``embedding`` fields populated.
+    """
+    from corbell.core.embeddings.model import GoogleEmbeddingModel, VoyageEmbeddingModel
+
+    if not chunks:
+        return chunks
+
+    if isinstance(model, GoogleEmbeddingModel) and model.uses_prefix_format:
+        texts = [
+            model.prepare_document(
+                c.content,
+                title=(
+                    f"{c.file_path}:{c.symbol}"
+                    if c.symbol
+                    else f"{c.file_path}:L{c.start_line}-{c.end_line}"
+                ),
+            )
+            for c in chunks
+        ]
+    else:
+        texts = [c.content for c in chunks]
+
+    is_api_model = isinstance(model, (GoogleEmbeddingModel, VoyageEmbeddingModel))
+
+    if is_api_model:
+        vectors: List[Any] = []
+        for i in range(0, len(texts), _API_BATCH_SIZE):
+            batch_texts = texts[i : i + _API_BATCH_SIZE]
+            vectors.extend(model.encode(batch_texts))
+    else:
+        vectors = model.encode(texts)
+
+    for chunk, vec in zip(chunks, vectors):
+        chunk.embedding = vec
+
+    return chunks
+
+
+# --------------------------------------------------------------------------- #
+# Parallel file collection helpers                                             #
+# --------------------------------------------------------------------------- #
+
+def _collect_repo_files(
+    repo_path: Path,
+    repo_id: str,
+    max_file_bytes: int,
+    gitignore_spec: Any,
+) -> List[Tuple[str, str, str]]:
+    """Walk repo_path and return (abs_path_str, rel_path, lang) for each indexable file.
+
+    Replicates the filtering logic from CodeChunkExtractor.extract_from_repo so
+    we can dispatch individual files to worker processes.
+
+    Args:
+        repo_path: Absolute path to the repo root.
+        repo_id: Repository identifier (unused here but kept for symmetry).
+        max_file_bytes: Maximum file size in bytes.
+        gitignore_spec: Pre-loaded PathSpec for gitignore filtering.
+
+    Returns:
+        List of (abs_path_str, rel_path, lang) tuples for picklable dispatch.
+    """
+    from corbell.core.constants import EXTENSION_LANG, SKIP_DIRS
+
+    file_list: List[Tuple[str, str, str]] = []
+    for fp in repo_path.rglob("*"):
+        if not fp.is_file():
+            continue
+        if any(part in SKIP_DIRS for part in fp.parts):
+            continue
+        lang = EXTENSION_LANG.get(fp.suffix)
+        if not lang:
+            continue
+        try:
+            if fp.stat().st_size > max_file_bytes:
+                continue
+        except OSError:
+            continue
+        rel = str(fp.relative_to(repo_path))
+        if gitignore_spec.match_file(rel.replace("\\", "/")):
+            continue
+        file_list.append((str(fp), rel, lang))
+    return file_list
 
 
 class IndexBuilder:
@@ -16,6 +173,10 @@ class IndexBuilder:
     Handles both full builds (--rebuild) and incremental builds (changed files only).
     Uses crash-safe ordering: meta is updated AFTER chunk commits so failed runs
     self-heal on the next invocation.
+
+    Concurrent builds are serialised by an ``IndexLock`` (file-based lock).  On
+    acquiring the lock the builder re-checks the stale state so a second caller
+    that waited for the lock can skip redundant work.
     """
 
     def build(
@@ -99,7 +260,7 @@ class IndexBuilder:
         if rebuild:
             return self._full_build(
                 repos, emb_store, graph_store, tracker, extractor, model,
-                indexing, model_name, progress_fn=progress_fn,
+                indexing, model_name, db_path, progress_fn=progress_fn,
             )
         else:
             stale = tracker.get_stale_files(repos, cfg)
@@ -108,7 +269,7 @@ class IndexBuilder:
 
             return self._incremental_build(
                 repos, stale, emb_store, graph_store, tracker,
-                extractor, model, cfg, indexing, model_name,
+                extractor, model, cfg, indexing, model_name, db_path,
                 progress_fn=progress_fn,
             )
 
@@ -122,12 +283,36 @@ class IndexBuilder:
         model: Any,
         indexing: Any,
         model_name: str,
+        db_path: Path,
         progress_fn: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
-        """Run a full (re)build across all repos."""
+        """Run a full (re)build across all repos, serialised by IndexLock."""
+        from corbell.core.indexing.lock import IndexLock
+
+        lock = IndexLock(db_path.parent / "index.lock")
+        with lock:
+            return self._full_build_locked(
+                repos, emb_store, graph_store, tracker, extractor, model,
+                indexing, model_name, progress_fn=progress_fn,
+            )
+
+    def _full_build_locked(
+        self,
+        repos: List,
+        emb_store: Any,
+        graph_store: Any,
+        tracker: IndexTracker,
+        extractor: Any,
+        model: Any,
+        indexing: Any,
+        model_name: str,
+        progress_fn: Optional[Callable[[str], None]] = None,
+    ) -> Dict[str, Any]:
+        """Inner full build — called while holding IndexLock."""
         total_chunks = 0
         total_repos = 0
         services_data = []
+        workers = _get_worker_count()
 
         for repo in repos:
             repo_id = repo.id
@@ -137,7 +322,6 @@ class IndexBuilder:
 
             language = repo.language or "python"
 
-            # Build graph for this repo
             services_data.append({
                 "id": repo_id,
                 "resolved_path": repo_path,
@@ -146,36 +330,53 @@ class IndexBuilder:
                 "tags": [],
             })
 
-            # Load gitignore once per repo, share with extractor
             gitignore_spec = load_gitignore(repo_path)
 
-            # Extract and embed chunks
-            chunks = extractor.extract_from_repo(
-                repo_path, repo_id,
-                max_file_bytes=indexing.max_file_bytes,
-                gitignore_spec=gitignore_spec,
+            # Collect file list for parallel dispatch
+            file_list = _collect_repo_files(
+                repo_path, repo_id, indexing.max_file_bytes, gitignore_spec
             )
+
+            if not file_list:
+                total_repos += 1
+                continue
+
+            if progress_fn:
+                progress_fn(
+                    f"Extracting {repo_id} ({len(file_list)} files, {workers} workers)..."
+                )
+
+            # Build worker args (all strings — picklable)
+            worker_args = [
+                (
+                    abs_path_str,
+                    rel_path,
+                    lang,
+                    repo_id,
+                    str(repo_path),
+                    indexing.chunk_size,
+                    indexing.chunk_overlap,
+                    indexing.max_file_bytes,
+                )
+                for abs_path_str, rel_path, lang in file_list
+            ]
+
+            # Parallel extraction
+            chunks: List[Any] = []
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_extract_file_worker, arg): arg for arg in worker_args}
+                for future in as_completed(futures):
+                    try:
+                        chunks.extend(future.result())
+                    except Exception:
+                        pass  # individual file failures are non-fatal
+
             if progress_fn:
                 progress_fn(f"Indexing {repo_id} ({len(chunks)} chunks)...")
+
             if chunks:
-                from corbell.core.embeddings.model import GoogleEmbeddingModel, VoyageEmbeddingModel
-                if isinstance(model, GoogleEmbeddingModel) and model.uses_prefix_format:
-                    texts = [
-                        model.prepare_document(
-                            c.content,
-                            title=f"{c.file_path}:{c.symbol}"
-                            if c.symbol
-                            else f"{c.file_path}:L{c.start_line}-{c.end_line}",
-                        )
-                        for c in chunks
-                    ]
-                elif isinstance(model, VoyageEmbeddingModel):
-                    texts = [c.content for c in chunks]
-                else:
-                    texts = [c.content for c in chunks]
-                vectors = model.encode(texts)
-                for chunk, vec in zip(chunks, vectors):
-                    chunk.embedding = vec
+                # Encode all chunks for this repo
+                _encode_chunks(model, chunks)
 
                 # CRASH-SAFE: commit chunks first, then update meta
                 emb_store.upsert_batch(chunks)
@@ -223,14 +424,44 @@ class IndexBuilder:
         cfg: Any,
         indexing: Any,
         model_name: str,
+        db_path: Path,
         progress_fn: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
-        """Re-embed changed files and rebuild graph for affected repos."""
+        """Re-embed changed files and rebuild graph for affected repos, serialised by IndexLock."""
+        from corbell.core.indexing.lock import IndexLock
+
+        lock = IndexLock(db_path.parent / "index.lock")
+        with lock:
+            # Re-check after acquiring lock — another process may have built already
+            fresh_stale = tracker.get_stale_files(repos, cfg)
+            if not fresh_stale.has_changes:
+                return {"status": "clean", "chunks_added": 0, "repos_rebuilt": 0}
+
+            return self._incremental_build_locked(
+                repos, fresh_stale, emb_store, graph_store, tracker,
+                extractor, model, indexing, model_name, progress_fn=progress_fn,
+            )
+
+    def _incremental_build_locked(
+        self,
+        repos: List,
+        stale: Any,
+        emb_store: Any,
+        graph_store: Any,
+        tracker: IndexTracker,
+        extractor: Any,
+        model: Any,
+        indexing: Any,
+        model_name: str,
+        progress_fn: Optional[Callable[[str], None]] = None,
+    ) -> Dict[str, Any]:
+        """Inner incremental build — called while holding IndexLock."""
         from corbell.core.graph.builder import ServiceGraphBuilder
         from corbell.core.graph.method_graph import MethodGraphBuilder
 
         total_chunks = 0
         changed_repo_ids = stale.changed_repo_ids
+        workers = _get_worker_count()
 
         # Build a lookup of repo_id → repo
         repo_map = {r.id: r for r in repos}
@@ -251,46 +482,60 @@ class IndexBuilder:
                 continue
             repo_path = repo.resolved_path
             if progress_fn:
-                progress_fn(f"Re-indexing {len(file_paths)} files in {repo_id}...")
+                progress_fn(
+                    f"Re-indexing {len(file_paths)} files in {repo_id} ({workers} workers)..."
+                )
 
+            # Delete old chunks for all files in this repo before re-extracting
+            for rel_path in file_paths:
+                emb_store.delete_by_file(rel_path, repo_id)
+
+            # Build worker args for all files in this repo
+            from corbell.core.constants import EXTENSION_LANG
+
+            worker_args = []
             for rel_path in file_paths:
                 abs_path = repo_path / rel_path
                 if not abs_path.exists():
                     continue
-
-                # Delete old chunks for this file
-                emb_store.delete_by_file(rel_path, repo_id)
-
-                # Extract chunks from file
-                from corbell.core.constants import EXTENSION_LANG
                 lang = EXTENSION_LANG.get(abs_path.suffix, "python")
-                chunks = extractor._extract_file(abs_path, rel_path, lang, repo_id, str(repo_path))
+                worker_args.append((
+                    str(abs_path),
+                    rel_path,
+                    lang,
+                    repo_id,
+                    str(repo_path),
+                    indexing.chunk_size,
+                    indexing.chunk_overlap,
+                    indexing.max_file_bytes,
+                ))
 
-                if chunks:
-                    from corbell.core.embeddings.model import GoogleEmbeddingModel, VoyageEmbeddingModel
-                    if isinstance(model, GoogleEmbeddingModel) and model.uses_prefix_format:
-                        texts = [
-                            model.prepare_document(
-                                c.content,
-                                title=f"{c.file_path}:{c.symbol}"
-                                if c.symbol
-                                else f"{c.file_path}:L{c.start_line}-{c.end_line}",
-                            )
-                            for c in chunks
-                        ]
-                    elif isinstance(model, VoyageEmbeddingModel):
-                        texts = [c.content for c in chunks]
-                    else:
-                        texts = [c.content for c in chunks]
-                    vectors = model.encode(texts)
-                    for chunk, vec in zip(chunks, vectors):
-                        chunk.embedding = vec
+            if not worker_args:
+                continue
 
-                    # CRASH-SAFE: commit chunks first
-                    emb_store.upsert_batch(chunks)
-                    total_chunks += len(chunks)
+            # Parallel extraction for this repo's changed files
+            chunks: List[Any] = []
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_extract_file_worker, arg): arg for arg in worker_args}
+                for future in as_completed(futures):
+                    try:
+                        chunks.extend(future.result())
+                    except Exception:
+                        pass  # individual file failures are non-fatal
 
-                # Mark file as indexed AFTER commit
+            if chunks:
+                # Encode all chunks for this repo batch
+                _encode_chunks(model, chunks)
+
+                # CRASH-SAFE: commit chunks first
+                emb_store.upsert_batch(chunks)
+                total_chunks += len(chunks)
+
+            # Mark all processed files as indexed AFTER commit
+            for rel_path in file_paths:
+                abs_path = repo_path / rel_path
+                if not abs_path.exists():
+                    continue
                 try:
                     mtime = abs_path.stat().st_mtime
                 except OSError:
@@ -351,3 +596,4 @@ class IndexBuilder:
                 except OSError:
                     result[rel_path] = time.time()
         return result
+
