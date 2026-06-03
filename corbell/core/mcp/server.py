@@ -87,7 +87,12 @@ def context_engine_codebase_retrieval(
             )
 
         if chunk_count == 0:
-            return "No index found. Run 'corbell index build' from terminal first."
+            import logging
+            logging.getLogger(__name__).info(
+                "Index is empty — running full build now (this may take a while)..."
+            )
+            builder = IndexBuilder()
+            builder.build(cfg, db_path, rebuild=True)
 
         # Blocking incremental rebuild if stale (MCP never does full build)
         tracker = IndexTracker(db_path)

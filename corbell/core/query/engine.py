@@ -70,7 +70,9 @@ def codebase_retrieval(
     # --- Auto-index check ---
     chunk_count = emb_store.count()
     if chunk_count == 0:
-        return "No index found. Run 'corbell index build' first."
+        logger.info("Index is empty — running full build now (this may take a while)...")
+        builder = IndexBuilder()
+        builder.build(cfg, db_path, rebuild=True)
 
     stale_result = tracker.get_stale_files(cfg.repos, cfg)
     if stale_result.has_changes:
