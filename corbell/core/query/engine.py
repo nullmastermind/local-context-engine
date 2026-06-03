@@ -34,7 +34,7 @@ def codebase_retrieval(
 
     Args:
         query: Natural language query string.
-        workspace_path: Path to workspace.yaml or its containing directory.
+        workspace_path: Path to the workspace (repository) root directory.
         top_k: Maximum number of chunks to pass to reranker.
         use_llm: If False, skip reranking.
         rerank: If False, skip reranking even when LLM is configured.
@@ -43,7 +43,7 @@ def codebase_retrieval(
         Formatted code snippet string ready for LLM context injection.
         Returns an error string (prefixed with "Error:") on failure.
     """
-    from corbell.core.workspace import load_workspace
+    from corbell.core.workspace import build_config, db_path_for_workspace
     from corbell.core.embeddings.sqlite_store import SQLiteEmbeddingStore
     from corbell.core.embeddings.search_cache import EmbeddingSearchCache
     from corbell.core.embeddings.model import SentenceTransformerModel, GoogleEmbeddingModel, EmbeddingModel
@@ -56,15 +56,13 @@ def codebase_retrieval(
     from corbell.core.query.reranker import rerank_chunks
     from corbell.core.query.formatter import format_results
 
-    workspace_path = Path(workspace_path)
-    config_dir = workspace_path if workspace_path.is_dir() else workspace_path.parent
+    workspace_path = Path(workspace_path).resolve()
 
-    try:
-        cfg = load_workspace(workspace_path)
-    except FileNotFoundError:
-        return f"Error: workspace.yaml not found at {workspace_path}. Run 'corbell init' first."
+    if not workspace_path.exists():
+        return f"Error: Workspace directory not found: {workspace_path}. Run 'corbell index build' first."
 
-    db_path = cfg.db_path(config_dir)
+    cfg = build_config(workspace_path)
+    db_path = db_path_for_workspace(workspace_path)
     emb_store = SQLiteEmbeddingStore(db_path)
     graph_store = SQLiteGraphStore(db_path)
     tracker = IndexTracker(db_path)
@@ -83,10 +81,10 @@ def codebase_retrieval(
         if age_seconds > one_day:
             # Stale + old → blocking incremental rebuild
             builder = IndexBuilder()
-            builder.build(cfg, config_dir, rebuild=False)
+            builder.build(cfg, db_path, rebuild=False)
         else:
             # Stale + recent → background subprocess
-            _spawn_background_worker(workspace_path, config_dir, db_path)
+            _spawn_background_worker(workspace_path, db_path)
 
     # --- LLM client setup ---
     llm_client: Optional[Any] = None
@@ -327,15 +325,13 @@ def _annotate_with_graph_meta(
 
 def _spawn_background_worker(
     workspace_path: Path,
-    config_dir: Path,
     db_path: Path,
 ) -> None:
     """Spawn a background subprocess for incremental index rebuild.
 
     Uses PID file deduplication to prevent double-spawning.
     """
-    pid_file = config_dir / ".corbell" / "index.pid"
-    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file = db_path.parent / "index.pid"
 
     # Check if a worker is already running
     if pid_file.exists():

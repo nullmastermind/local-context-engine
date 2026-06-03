@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Optional
 
 import typer
 from rich.console import Console
@@ -17,20 +19,25 @@ def search(
     top: int = typer.Option(50, "--top", "-n", help="Maximum number of chunks to return."),
     no_llm: bool = typer.Option(False, "--no-llm", help="Disable LLM enhancement and reranking."),
     no_rerank: bool = typer.Option(False, "--no-rerank", help="Disable LLM reranking."),
-    workspace: str = typer.Option(
-        ..., "--workspace", "-w", help="Path to workspace.yaml or its directory."
+    workspace_full_path: Optional[str] = typer.Option(
+        None,
+        "--workspace-full-path",
+        help="Full path to the workspace (repository) root directory.",
     ),
 ) -> None:
     """Search the indexed codebase using natural language.
 
     Returns relevant code snippets with file paths and line numbers,
     formatted for use as LLM context.
-    """
-    # Resolve workspace path
-    ws_path = Path(workspace)
 
-    if not ws_path.exists() and ws_path.is_dir():
-        ws_path = ws_path / "workspace.yaml"
+    Workspace path resolution order:
+    1. --workspace-full-path flag
+    2. CORBELL_WORKSPACE environment variable
+    3. Current working directory
+    """
+    # Resolve workspace path: flag → env var → cwd
+    raw_path = workspace_full_path or os.environ.get("CORBELL_WORKSPACE") or str(Path.cwd())
+    ws_path = Path(raw_path).resolve()
 
     from corbell.core.query.engine import codebase_retrieval
 

@@ -76,44 +76,19 @@ def sample_repo(tmp_path) -> Path:
 
 
 @pytest.fixture
-def sample_workspace_yaml(tmp_path, sample_repo) -> Path:
-    """Write a valid workspace.yaml into tmp_path/corbell/ using new repos schema."""
-    ws_dir = tmp_path / "corbell"
-    ws_dir.mkdir()
-    yaml_content = f"""\
-version: "1"
-workspace:
-  name: test-platform
-  root: ..
+def workspace_config(sample_repo, monkeypatch):
+    """Return a WorkspaceConfig built from sample_repo with env var overrides cleared."""
+    # Clear any CORBELL_* env vars that might bleed from the environment
+    for var in (
+        "CORBELL_TOP_K", "CORBELL_CHUNK_SIZE", "CORBELL_CHUNK_OVERLAP",
+        "CORBELL_EXPAND_CALL_DEPTH", "CORBELL_EXPAND_MAX_CHUNKS",
+        "CORBELL_RERANK", "CORBELL_EMBEDDING_MODEL", "CORBELL_MAX_FILE_BYTES",
+        "CORBELL_SKIP_DIRS", "CORBELL_LLM_MODEL",
+    ):
+        monkeypatch.delenv(var, raising=False)
 
-repos:
-  - id: sample-service
-    path: {sample_repo}
-    language: python
-
-storage:
-  path: .corbell/test.db
-  model: all-MiniLM-L6-v2
-
-query:
-  top_k: 50
-  expand_call_depth: 2
-  expand_max_chunks: 30
-  rerank: false
-
-indexing:
-  skip_dirs: []
-  max_file_bytes: 1048576
-  chunk_size: 50
-  chunk_overlap: 10
-
-llm:
-  provider: anthropic
-  model: claude-sonnet-4-5
-"""
-    ws_file = ws_dir / "workspace.yaml"
-    ws_file.write_text(yaml_content)
-    return ws_file
+    from corbell.core.workspace import build_config
+    return build_config(sample_repo)
 
 
 @pytest.fixture

@@ -16,19 +16,19 @@ def main() -> None:
         print("Usage: python -m corbell.core.indexing._worker <workspace_path>", file=sys.stderr)
         sys.exit(1)
 
-    workspace_path = sys.argv[1]
+    workspace_path_str = sys.argv[1]
 
     try:
         from pathlib import Path
-        from corbell.core.workspace import load_workspace
+        from corbell.core.workspace import build_config, db_path_for_workspace
         from corbell.core.indexing.builder import IndexBuilder
 
-        config_path = Path(workspace_path)
-        cfg = load_workspace(config_path)
-        config_dir = config_path if config_path.is_dir() else config_path.parent
+        workspace_path = Path(workspace_path_str).resolve()
+        cfg = build_config(workspace_path)
+        db_path = db_path_for_workspace(workspace_path)
 
         builder = IndexBuilder()
-        result = builder.build(cfg, config_dir, rebuild=False)
+        result = builder.build(cfg, db_path, rebuild=False)
 
         print(f"Background index complete: {result}", file=sys.stderr)
 

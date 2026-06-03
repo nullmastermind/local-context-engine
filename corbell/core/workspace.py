@@ -1,17 +1,16 @@
-"""Workspace configuration loader for Corbell."""
+"""Workspace configuration for Corbell — env-var driven, no YAML required."""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 
-import yaml
 from pydantic import BaseModel, Field
 
 
 class RepoConfig(BaseModel):
-    """A single repository definition in workspace.yaml."""
+    """A single repository definition."""
 
     id: str
     path: str
@@ -22,13 +21,8 @@ class RepoConfig(BaseModel):
 
 
 class StorageConfig(BaseModel):
-    """Storage sub-config (single SQLite file for both graph and embeddings).
+    """Storage sub-config (single SQLite file for both graph and embeddings)."""
 
-    The embedding model can be overridden via the ``CORBELL_EMBEDDING_MODEL``
-    environment variable without touching workspace.yaml.
-    """
-
-    path: str = ".corbell/workspace.db"
     model: str = "all-MiniLM-L6-v2"
 
     model_config = {"extra": "ignore"}
@@ -38,7 +32,7 @@ class StorageConfig(BaseModel):
 
         Resolution order:
         1. ``CORBELL_EMBEDDING_MODEL`` env var (if set)
-        2. ``model`` field from workspace.yaml
+        2. ``model`` field default
         """
         return os.environ.get("CORBELL_EMBEDDING_MODEL") or self.model
 
@@ -71,13 +65,13 @@ class LLMConfig(BaseModel):
     Local providers: openai, anthropic, ollama, google.
     Cloud providers: aws (Bedrock), azure (Azure OpenAI), gcp (Vertex AI).
 
-    API key can be provided here or via env vars:
+    API key resolved via env vars:
     ANTHROPIC_API_KEY, OPENAI_API_KEY, AZURE_OPENAI_API_KEY, CORBELL_LLM_API_KEY
 
     Model can be overridden via env vars (checked in order):
     1. Provider-specific: ANTHROPIC_MODEL, OPENAI_MODEL, GOOGLE_MODEL, etc.
     2. Generic: CORBELL_LLM_MODEL
-    3. ``model`` field from workspace.yaml
+    3. ``model`` field default
     """
 
     provider: str = "anthropic"
@@ -104,7 +98,7 @@ class LLMConfig(BaseModel):
         Resolution order:
         1. Provider-specific env var (e.g. ``ANTHROPIC_MODEL``, ``GOOGLE_MODEL``)
         2. ``CORBELL_LLM_MODEL`` env var
-        3. ``model`` field from workspace.yaml
+        3. ``model`` field default
         """
         provider_env_map = {
             "anthropic": "ANTHROPIC_MODEL",
@@ -123,13 +117,7 @@ class LLMConfig(BaseModel):
         return os.environ.get("CORBELL_LLM_MODEL") or self.model
 
     def resolved_api_key(self) -> Optional[str]:
-        """Return the API key, resolving env var placeholders if needed."""
-        key = self.api_key or ""
-        if key.startswith("${") and key.endswith("}"):
-            var = key[2:-1]
-            return os.environ.get(var)
-        if key:
-            return key
+        """Return the API key from env vars."""
         # Cloud providers use their own credential chains (no API key needed)
         if self.provider in ("aws", "gcp"):
             return None
@@ -147,128 +135,57 @@ class LLMConfig(BaseModel):
         return None
 
 
-class WorkspaceInfo(BaseModel):
-    """Top-level workspace metadata."""
-
-    name: str = "my-platform"
-    root: str = ".."
-
-    model_config = {"extra": "ignore"}
-
-
 class WorkspaceConfig(BaseModel):
-    """Root workspace configuration model (parsed from workspace.yaml)."""
+    """Root workspace configuration model (populated from env vars)."""
 
     version: str = "1"
-    workspace: WorkspaceInfo = Field(default_factory=WorkspaceInfo)
     repos: List[RepoConfig] = Field(default_factory=list)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     query: QueryConfig = Field(default_factory=QueryConfig)
     indexing: IndexingConfig = Field(default_factory=IndexingConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
 
-    # Internal: path this config was loaded from
-    _config_path: Optional[Path] = None
-
     model_config = {"extra": "ignore"}
 
-    def resolve_paths(self, config_dir: Path) -> "WorkspaceConfig":
-        """Resolve relative repo paths to absolute paths under config_dir."""
-        for repo in self.repos:
-            raw = repo.path
-            if raw.startswith("${"):
-                var = raw[2:-1]
-                raw = os.environ.get(var, raw)
-            p = Path(raw)
-            if not p.is_absolute():
-                p = (config_dir / p).resolve()
-            repo.resolved_path = p
-        return self
 
-    def db_path(self, config_dir: Path) -> Path:
-        """Return absolute path to the SQLite DB file."""
-        raw = self.storage.path
-        p = Path(raw)
-        if not p.is_absolute():
-            p = (config_dir / p).resolve()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        return p
+# ---------------------------------------------------------------------------
+# Path helpers
+# ---------------------------------------------------------------------------
 
 
-def _expand_env(value: Any) -> Any:
-    """Recursively expand ${VAR} references in dict/list/str values.
+def sanitize_path(workspace_path: Path) -> str:
+    """Sanitize a workspace path for use as a filesystem directory name.
 
-    - ``${VAR}``  → value of env var VAR, or None if not set
-                    (a warning is emitted when the var is missing)
-    - Any other string → used as-is (literal value)
+    Steps:
+    1. Resolve to absolute path.
+    2. Strip trailing separators.
+    3. Replace ``/``, ``\\``, ``:`` with ``-``.
+    4. Strip leading ``-`` characters.
+
+    Examples:
+        /home/user/projects/my-app  →  home-user-projects-my-app
+        D:\\projects\\Python\\local-context-engine  →  D--projects-Python-local-context-engine
     """
-    if isinstance(value, str):
-        if value.startswith("${") and value.endswith("}"):
-            var = value[2:-1]
-            resolved = os.environ.get(var)
-            if resolved is None:
-                import warnings
-                warnings.warn(
-                    f"Environment variable '{var}' is referenced in workspace.yaml but is not set.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            return resolved
-        return value
-    if isinstance(value, dict):
-        return {k: _expand_env(v) for k, v in value.items()}
-    if isinstance(value, list):
-        return [_expand_env(i) for i in value]
-    return value
+    resolved = str(workspace_path.resolve())
+    # Strip trailing path separators
+    resolved = resolved.rstrip("/\\")
+    # Replace path separators and Windows drive colon with dash
+    sanitized = resolved.replace("\\", "-").replace("/", "-").replace(":", "-")
+    # Strip leading dashes (e.g. from a leading / after replacement on Linux)
+    sanitized = sanitized.lstrip("-")
+    return sanitized
 
 
-def load_workspace(path: Path | str) -> "WorkspaceConfig":
-    """Load and parse a workspace.yaml file.
+def db_path_for_workspace(workspace_path: Path) -> Path:
+    """Return the SQLite DB path for a workspace.
 
-    Args:
-        path: Path to ``workspace.yaml`` or the directory containing it.
-
-    Returns:
-        Parsed and path-resolved :class:`WorkspaceConfig`.
-
-    Raises:
-        FileNotFoundError: If the workspace file does not exist.
-        ValueError: If the file is not valid YAML or fails schema validation.
+    Stored at ``~/.vibervn/context-engine/{sanitized}/workspace.db``.
+    Creates parent directories automatically.
     """
-    path = Path(path)
-    if path.is_dir():
-        path = path / "workspace.yaml"
-    if not path.exists():
-        raise FileNotFoundError(f"Workspace file not found: {path}")
-
-    with path.open("r", encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh) or {}
-
-    raw = _expand_env(raw)
-    config = WorkspaceConfig.model_validate(raw)
-    config._config_path = path
-    config.resolve_paths(path.parent)
-    return config
-
-
-def find_workspace_root(start: Path | str | None = None) -> Optional[Path]:
-    """Walk up directories looking for workspace.yaml.
-
-    Args:
-        start: Directory to start searching from (default: cwd).
-
-    Returns:
-        Path to the **directory** containing ``workspace.yaml`` (or
-        ``corbell/workspace.yaml`` or ``corbell-data/workspace.yaml``), or
-        ``None`` if not found.
-    """
-    current = Path(start or Path.cwd()).resolve()
-    for candidate in [current, *current.parents]:
-        for sub in ("corbell", "corbell-data", ""):
-            ws = candidate / sub / "workspace.yaml" if sub else candidate / "workspace.yaml"
-            if ws.exists():
-                return ws.parent
-    return None
+    name = sanitize_path(workspace_path)
+    db_dir = Path.home() / ".vibervn" / "context-engine" / name
+    db_dir.mkdir(parents=True, exist_ok=True)
+    return db_dir / "workspace.db"
 
 
 def _detect_language(path: Path) -> str:
@@ -291,121 +208,58 @@ def _detect_language(path: Path) -> str:
     return "python"
 
 
-def _detect_repos(target_dir: Path) -> List[Dict[str, Any]]:
-    """Detect repos in the target directory (single repo or monorepo subdirectories)."""
-    repos = []
+def build_config(workspace_path: Path) -> WorkspaceConfig:
+    """Build a WorkspaceConfig from environment variables and a workspace path.
 
-    def is_repo_dir(d: Path) -> bool:
-        indicators = [
-            ".git", "package.json", "requirements.txt", "pyproject.toml",
-            "go.mod", "pom.xml", "Cargo.toml",
-        ]
-        return any((d / i).exists() for i in indicators)
-
-    if is_repo_dir(target_dir):
-        sub_repos = []
-        for child in target_dir.iterdir():
-            if (
-                child.is_dir()
-                and not child.name.startswith(".")
-                and child.name not in ("node_modules", "venv", ".venv", "dist", "build")
-            ):
-                if is_repo_dir(child):
-                    sub_repos.append(child)
-
-        if len(sub_repos) > 0:
-            for child in sub_repos:
-                repos.append({
-                    "id": child.name,
-                    "path": f"../{child.name}",
-                    "language": _detect_language(child),
-                })
-        else:
-            repos.append({
-                "id": target_dir.name,
-                "path": "..",
-                "language": _detect_language(target_dir),
-            })
-    else:
-        for child in target_dir.iterdir():
-            if (
-                child.is_dir()
-                and not child.name.startswith(".")
-                and child.name not in ("node_modules", "venv", ".venv", "dist", "build")
-            ):
-                if is_repo_dir(child):
-                    repos.append({
-                        "id": child.name,
-                        "path": f"../{child.name}",
-                        "language": _detect_language(child),
-                    })
-
-    if not repos:
-        repos.append({
-            "id": "my-repo",
-            "path": "../my-repo",
-            "language": "python",
-        })
-
-    return repos
-
-
-def init_workspace_yaml(target_dir: Path) -> Path:
-    """Write a starter workspace.yaml into target_dir/corbell/workspace.yaml.
+    Reads all ``CORBELL_*`` env vars with sensible defaults, then constructs
+    a single RepoConfig from the workspace_path (id = basename, path = workspace_path).
 
     Args:
-        target_dir: Root directory for the new workspace.
+        workspace_path: Absolute path to the workspace (repository) root directory.
 
     Returns:
-        Path to the written file.
+        Fully populated WorkspaceConfig ready for use by the indexer and query engine.
     """
-    out_dir = target_dir / "corbell"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / "workspace.yaml"
-    repos_detected = _detect_repos(target_dir)
-    repos_yaml = ""
-    for repo in repos_detected:
-        repos_yaml += f"  - id: {repo['id']}\n"
-        repos_yaml += f"    path: {repo['path']}\n"
-        if repo.get("language"):
-            repos_yaml += f"    language: {repo['language']}\n"
+    workspace_path = workspace_path.resolve()
 
-    template = """\
-version: "1"
+    # Parse env vars
+    top_k = int(os.environ.get("CORBELL_TOP_K", "50"))
+    chunk_size = int(os.environ.get("CORBELL_CHUNK_SIZE", "50"))
+    chunk_overlap = int(os.environ.get("CORBELL_CHUNK_OVERLAP", "10"))
+    expand_call_depth = int(os.environ.get("CORBELL_EXPAND_CALL_DEPTH", "2"))
+    expand_max_chunks = int(os.environ.get("CORBELL_EXPAND_MAX_CHUNKS", "30"))
+    rerank_str = os.environ.get("CORBELL_RERANK", "true").lower()
+    rerank = rerank_str not in ("false", "0", "no")
+    embedding_model = os.environ.get("CORBELL_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+    max_file_bytes = int(os.environ.get("CORBELL_MAX_FILE_BYTES", str(1024 * 1024)))
+    skip_dirs_str = os.environ.get("CORBELL_SKIP_DIRS", "")
+    skip_dirs = [d.strip() for d in skip_dirs_str.split(",") if d.strip()] if skip_dirs_str else []
+    llm_model = os.environ.get("CORBELL_LLM_MODEL", "claude-sonnet-4-5")
 
-workspace:
-  name: "my-platform"
-  root: ".."
+    # Single repo: workspace root IS the repo
+    repo_id = workspace_path.name
+    language = _detect_language(workspace_path)
+    repo = RepoConfig(
+        id=repo_id,
+        path=str(workspace_path),
+        language=language,
+        resolved_path=workspace_path,
+    )
 
-repos:
-{repos_block}
-
-storage:
-  path: .corbell/workspace.db
-  model: all-MiniLM-L6-v2
-
-query:
-  top_k: 50
-  expand_call_depth: 2
-  expand_max_chunks: 30
-  rerank: true
-
-indexing:
-  skip_dirs: []
-  max_file_bytes: 1048576
-  chunk_size: 50
-  chunk_overlap: 10
-
-llm:
-  # ---- Option 1: Anthropic (recommended) ----
-  provider: anthropic
-  model: claude-sonnet-4-5
-  api_key: ${{ANTHROPIC_API_KEY}}
-
-  # ---- Option 2: OpenAI ----
-  # provider: openai
-  # model: gpt-4o
-  # api_key: ${{OPENAI_API_KEY}}
-"""
-    out.write_text(template.replace("{repos_block}", repos_yaml), encoding="utf-8")
-    return out
+    return WorkspaceConfig(
+        repos=[repo],
+        storage=StorageConfig(model=embedding_model),
+        query=QueryConfig(
+            top_k=top_k,
+            expand_call_depth=expand_call_depth,
+            expand_max_chunks=expand_max_chunks,
+            rerank=rerank,
+        ),
+        indexing=IndexingConfig(
+            skip_dirs=skip_dirs,
+            max_file_bytes=max_file_bytes,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        ),
+        llm=LLMConfig(model=llm_model),
+    )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -17,8 +18,10 @@ def build(
     rebuild: bool = typer.Option(
         False, "--rebuild", help="Clear existing index and perform a full rebuild."
     ),
-    workspace: str = typer.Option(
-        ..., "--workspace", "-w", help="Path to workspace.yaml or its directory."
+    workspace_full_path: Optional[str] = typer.Option(
+        None,
+        "--workspace-full-path",
+        help="Full path to the workspace (repository) root directory.",
     ),
     repo: Optional[str] = typer.Option(
         None, "--repo", help="Only index a specific repo by ID."
@@ -30,21 +33,24 @@ def build(
     changed files and rebuilds the graph for affected repos.
 
     Use --rebuild to force a full re-index from scratch.
+
+    Workspace path resolution order:
+    1. --workspace-full-path flag
+    2. CORBELL_WORKSPACE environment variable
+    3. Current working directory
     """
-    from corbell.core.workspace import load_workspace
+    from corbell.core.workspace import build_config, db_path_for_workspace
 
-    ws_path = Path(workspace)
+    # Resolve workspace path: flag → env var → cwd
+    raw_path = workspace_full_path or os.environ.get("CORBELL_WORKSPACE") or str(Path.cwd())
+    ws_path = Path(raw_path).resolve()
 
-    if not ws_path.exists() and ws_path.is_dir():
-        ws_path = ws_path / "workspace.yaml"
-
-    try:
-        cfg = load_workspace(ws_path)
-    except FileNotFoundError as exc:
-        console.print(f"[red]Error:[/red] {exc}")
+    if not ws_path.exists():
+        console.print(f"[red]Error:[/red] Workspace directory not found: {ws_path}")
         raise typer.Exit(1)
 
-    config_dir = ws_path.parent if ws_path.is_file() else ws_path
+    cfg = build_config(ws_path)
+    db_path = db_path_for_workspace(ws_path)
 
     from corbell.core.indexing.builder import IndexBuilder
     builder = IndexBuilder()
@@ -54,7 +60,7 @@ def build(
     console.print(f"[bold]{mode}{target}[/bold] starting...")
 
     try:
-        result = builder.build(cfg, config_dir, rebuild=rebuild, repo_filter=repo)
+        result = builder.build(cfg, db_path, rebuild=rebuild, repo_filter=repo)
     except ValueError as exc:
         console.print(f"[red]Error:[/red] {exc}")
         raise typer.Exit(1)

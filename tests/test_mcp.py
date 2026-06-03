@@ -15,24 +15,14 @@ import pytest
 
 @pytest.fixture
 def temp_workspace(tmp_path):
-    """Create a minimal workspace with new repos schema."""
-    ws_dir = tmp_path / "corbell"
-    ws_dir.mkdir()
-    yaml_file = ws_dir / "workspace.yaml"
-    yaml_file.write_text("""\
-version: "1"
-workspace:
-  name: test-workspace
-repos: []
-llm:
-  provider: ollama
-  model: llama3
-""")
-    return tmp_path
+    """Create a minimal workspace directory (no yaml needed)."""
+    workspace = tmp_path / "test-workspace"
+    workspace.mkdir()
+    return workspace
 
 
 # ---------------------------------------------------------------------------
-# Tool Registration Tests (Task 8.9)
+# Tool Registration Tests
 # ---------------------------------------------------------------------------
 
 def test_mcp_server_registers_exactly_one_tool():
@@ -63,23 +53,13 @@ def test_mcp_tool_schema():
     assert "query" in required
 
 
-def test_mcp_tool_empty_index_returns_error(tmp_path):
+def test_mcp_tool_empty_index_returns_error(temp_workspace):
     """Tool returns error string when index is empty (no chunks in DB)."""
-    ws_dir = tmp_path / "corbell"
-    ws_dir.mkdir()
-    yaml_file = ws_dir / "workspace.yaml"
-    yaml_file.write_text("""\
-version: "1"
-workspace:
-  name: test
-repos: []
-""")
-
     from corbell.core.mcp.server import context_engine_codebase_retrieval
 
     result = context_engine_codebase_retrieval(
         query="test query",
-        workspace_full_path=str(yaml_file),
+        workspace_full_path=str(temp_workspace),
     )
 
     assert isinstance(result, str)
@@ -87,12 +67,12 @@ repos: []
 
 
 def test_mcp_tool_missing_workspace_returns_error(tmp_path):
-    """Tool returns error string when workspace.yaml doesn't exist."""
+    """Tool returns error string when workspace directory doesn't exist."""
     from corbell.core.mcp.server import context_engine_codebase_retrieval
 
     result = context_engine_codebase_retrieval(
         query="test query",
-        workspace_full_path=str(tmp_path / "nonexistent" / "workspace.yaml"),
+        workspace_full_path=str(tmp_path / "nonexistent" / "repo"),
     )
 
     assert isinstance(result, str)
@@ -106,7 +86,7 @@ def test_mcp_tool_returns_string_not_exception():
     # Should not raise, even with completely invalid input
     result = context_engine_codebase_retrieval(
         query="anything",
-        workspace_full_path="/completely/invalid/path/workspace.yaml",
+        workspace_full_path="/completely/invalid/path/repo",
     )
     assert isinstance(result, str)
 
@@ -119,7 +99,7 @@ def test_resolve_workspace_explicit_path(tmp_path):
     """Explicit path is used directly."""
     from corbell.core.mcp.server import _resolve_workspace
 
-    explicit = str(tmp_path / "workspace.yaml")
+    explicit = str(tmp_path / "my-repo")
     result = _resolve_workspace(explicit)
     assert result == explicit
 
@@ -141,6 +121,36 @@ def test_resolve_workspace_returns_none_when_nothing_found(tmp_path, monkeypatch
 
     result = _resolve_workspace("")
     assert result is None
+
+
+def test_mcp_tool_uses_env_fallback(tmp_path, monkeypatch):
+    """Tool uses CORBELL_WORKSPACE env var when workspace_full_path is empty."""
+    workspace = tmp_path / "my-workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("CORBELL_WORKSPACE", str(workspace))
+
+    from corbell.core.mcp.server import context_engine_codebase_retrieval
+
+    result = context_engine_codebase_retrieval(
+        query="test query",
+        workspace_full_path="",
+    )
+
+    assert isinstance(result, str)
+    # Empty index — not a directory-not-found error
+    assert "No index found" in result or "corbell index build" in result
+
+
+def test_mcp_tool_error_message_no_yaml_reference(tmp_path):
+    """Error messages do not mention workspace.yaml."""
+    from corbell.core.mcp.server import context_engine_codebase_retrieval
+
+    result = context_engine_codebase_retrieval(
+        query="test query",
+        workspace_full_path=str(tmp_path / "nonexistent"),
+    )
+
+    assert "workspace.yaml" not in result.lower()
 
 
 # ---------------------------------------------------------------------------

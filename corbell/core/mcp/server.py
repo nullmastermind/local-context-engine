@@ -36,7 +36,7 @@ def context_engine_codebase_retrieval(
 
     Args:
         query: Natural language description of the code you're looking for.
-        workspace_full_path: Required. Full path to workspace.yaml or its directory.
+        workspace_full_path: Full path to the workspace (repository) root directory.
             Falls back to CORBELL_WORKSPACE env var if empty.
         top_k: Maximum number of code chunks to return (default 50).
         rerank: Whether to use LLM reranking for better relevance (default true).
@@ -45,33 +45,29 @@ def context_engine_codebase_retrieval(
         Formatted code snippets, or an error string on failure.
     """
     try:
-        workspace_path = _resolve_workspace(workspace_full_path)
-        if workspace_path is None:
+        workspace_path_str = _resolve_workspace(workspace_full_path)
+        if workspace_path_str is None:
             return (
                 "Error: workspace_full_path is required. "
-                "Pass the full path to workspace.yaml or its directory."
+                "Pass the full path to the workspace (repository) root directory."
             )
 
         from pathlib import Path
-        from corbell.core.workspace import load_workspace
+        from corbell.core.workspace import build_config, db_path_for_workspace
         from corbell.core.embeddings.sqlite_store import SQLiteEmbeddingStore
         from corbell.core.indexing.tracker import IndexTracker
         from corbell.core.indexing.builder import IndexBuilder
 
-        ws_path = Path(workspace_path)
-        config_dir = ws_path if ws_path.is_dir() else ws_path.parent
+        ws_path = Path(workspace_path_str).resolve()
 
-        try:
-            cfg = load_workspace(ws_path)
-        except FileNotFoundError:
+        if not ws_path.exists():
             return (
-                f"Error: workspace.yaml not found at {ws_path}. "
-                "Run 'corbell init' first."
+                f"Error: Workspace directory not found: {ws_path}. "
+                "Ensure the path points to a valid repository root."
             )
-        except Exception as exc:
-            return f"Error: Failed to load workspace config: {exc}"
 
-        db_path = cfg.db_path(config_dir)
+        cfg = build_config(ws_path)
+        db_path = db_path_for_workspace(ws_path)
 
         try:
             emb_store = SQLiteEmbeddingStore(db_path)
@@ -99,7 +95,7 @@ def context_engine_codebase_retrieval(
         if stale_result.has_changes:
             try:
                 builder = IndexBuilder()
-                builder.build(cfg, config_dir, rebuild=False)
+                builder.build(cfg, db_path, rebuild=False)
             except Exception:
                 # Non-fatal: proceed with current index
                 pass

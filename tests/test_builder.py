@@ -31,31 +31,33 @@ def repo(tmp_path) -> Path:
 
 
 @pytest.fixture
-def workspace_yaml(tmp_path, repo) -> Path:
-    ws_dir = tmp_path / "corbell"
-    ws_dir.mkdir()
-    ws = ws_dir / "workspace.yaml"
-    ws.write_text(f"""\
-version: "1"
-workspace:
-  name: test
-repos:
-  - id: my-repo
-    path: {repo}
-    language: python
-storage:
-  path: .corbell/test.db
-  model: test-model
-query:
-  top_k: 10
-indexing:
-  chunk_size: 50
-  chunk_overlap: 10
-  max_file_bytes: 1048576
-llm:
-  provider: anthropic
-""")
-    return ws
+def workspace_config(repo, monkeypatch, tmp_path):
+    """Build a WorkspaceConfig for the test repo, with embedding model set to 'test-model'."""
+    # Clear CORBELL_* env vars to get clean defaults
+    for var in (
+        "CORBELL_TOP_K", "CORBELL_CHUNK_SIZE", "CORBELL_CHUNK_OVERLAP",
+        "CORBELL_EXPAND_CALL_DEPTH", "CORBELL_EXPAND_MAX_CHUNKS",
+        "CORBELL_RERANK", "CORBELL_EMBEDDING_MODEL", "CORBELL_MAX_FILE_BYTES",
+        "CORBELL_SKIP_DIRS", "CORBELL_LLM_MODEL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    monkeypatch.setenv("CORBELL_EMBEDDING_MODEL", "test-model")
+    monkeypatch.setenv("CORBELL_TOP_K", "10")
+
+    from corbell.core.workspace import build_config
+    return build_config(repo)
+
+
+@pytest.fixture
+def db_path(repo, tmp_path, monkeypatch) -> Path:
+    """Return a temporary db path for the test repo."""
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+    from corbell.core.workspace import db_path_for_workspace
+    return db_path_for_workspace(repo)
 
 
 def _make_mock_model():
@@ -69,19 +71,13 @@ def _make_mock_model():
 # Full build
 # ---------------------------------------------------------------------------
 
-def test_full_build_indexes_all_files(workspace_yaml, tmp_path):
+def test_full_build_indexes_all_files(workspace_config, db_path):
     """Full build indexes all files in the repo."""
-    from corbell.core.workspace import load_workspace
-
-    cfg = load_workspace(workspace_yaml)
-    config_dir = workspace_yaml.parent
-
-    db_path = cfg.db_path(config_dir)
     mock_model = _make_mock_model()
 
     with patch("corbell.core.indexing.builder.SentenceTransformerModel", return_value=mock_model):
         builder = IndexBuilder()
-        result = builder.build(cfg, config_dir, rebuild=True)
+        result = builder.build(workspace_config, db_path, rebuild=True)
 
     assert result["status"] == "full_build"
     assert result["chunks_added"] > 0
@@ -91,20 +87,14 @@ def test_full_build_indexes_all_files(workspace_yaml, tmp_path):
     assert emb_store.count() > 0
 
 
-def test_full_build_stores_metadata(workspace_yaml):
+def test_full_build_stores_metadata(workspace_config, db_path):
     """Full build updates index_meta with model and timestamp."""
-    from corbell.core.workspace import load_workspace
-
-    cfg = load_workspace(workspace_yaml)
-    config_dir = workspace_yaml.parent
-    db_path = cfg.db_path(config_dir)
-
     mock_model = _make_mock_model()
 
     before = time.time()
     with patch("corbell.core.indexing.builder.SentenceTransformerModel", return_value=mock_model):
         builder = IndexBuilder()
-        builder.build(cfg, config_dir, rebuild=True)
+        builder.build(workspace_config, db_path, rebuild=True)
 
     tracker = IndexTracker(db_path)
     stored_model = tracker.get_stored_model()
@@ -119,20 +109,14 @@ def test_full_build_stores_metadata(workspace_yaml):
 # Incremental build
 # ---------------------------------------------------------------------------
 
-def test_incremental_only_reindexes_changed_files(workspace_yaml, repo):
+def test_incremental_only_reindexes_changed_files(workspace_config, db_path, repo):
     """Incremental build only processes files that changed."""
-    from corbell.core.workspace import load_workspace
-
-    cfg = load_workspace(workspace_yaml)
-    config_dir = workspace_yaml.parent
-    cfg.db_path(config_dir)  # ensure .corbell directory is created
-
     mock_model = _make_mock_model()
 
     # First: full build
     with patch("corbell.core.indexing.builder.SentenceTransformerModel", return_value=mock_model):
         builder = IndexBuilder()
-        builder.build(cfg, config_dir, rebuild=True)
+        builder.build(workspace_config, db_path, rebuild=True)
 
     initial_encode_calls = mock_model.encode.call_count
 
@@ -147,7 +131,7 @@ def test_incremental_only_reindexes_changed_files(workspace_yaml, repo):
     # Second: incremental
     with patch("corbell.core.indexing.builder.SentenceTransformerModel", return_value=mock_model):
         builder2 = IndexBuilder()
-        result = builder2.build(cfg, config_dir, rebuild=False)
+        result = builder2.build(workspace_config, db_path, rebuild=False)
 
     assert result["status"] == "incremental"
     assert result["files_modified"] == 1
@@ -155,19 +139,14 @@ def test_incremental_only_reindexes_changed_files(workspace_yaml, repo):
     assert mock_model.encode.call_count > initial_encode_calls
 
 
-def test_incremental_detects_deleted_files(workspace_yaml, repo):
+def test_incremental_detects_deleted_files(workspace_config, db_path, repo):
     """Incremental build removes chunks for deleted files."""
-    from corbell.core.workspace import load_workspace
-
-    cfg = load_workspace(workspace_yaml)
-    config_dir = workspace_yaml.parent
-    db_path = cfg.db_path(config_dir)
     mock_model = _make_mock_model()
 
     # Full build first
     with patch("corbell.core.indexing.builder.SentenceTransformerModel", return_value=mock_model):
         builder = IndexBuilder()
-        builder.build(cfg, config_dir, rebuild=True)
+        builder.build(workspace_config, db_path, rebuild=True)
 
     count_before = SQLiteEmbeddingStore(db_path).count()
 
@@ -177,7 +156,7 @@ def test_incremental_detects_deleted_files(workspace_yaml, repo):
     # Incremental rebuild
     with patch("corbell.core.indexing.builder.SentenceTransformerModel", return_value=mock_model):
         builder2 = IndexBuilder()
-        result = builder2.build(cfg, config_dir, rebuild=False)
+        result = builder2.build(workspace_config, db_path, rebuild=False)
 
     assert result["files_deleted"] == 1
     count_after = SQLiteEmbeddingStore(db_path).count()
@@ -188,42 +167,33 @@ def test_incremental_detects_deleted_files(workspace_yaml, repo):
 # Model safety check
 # ---------------------------------------------------------------------------
 
-def test_model_mismatch_raises_error(workspace_yaml, repo):
+def test_model_mismatch_raises_error(workspace_config, db_path, monkeypatch):
     """Incremental build fails if the stored model doesn't match the current config."""
-    from corbell.core.workspace import load_workspace
-
-    cfg = load_workspace(workspace_yaml)
-    config_dir = workspace_yaml.parent
     mock_model = _make_mock_model()
 
-    # Full build with model "test-model"
+    # Full build with "test-model"
     with patch("corbell.core.indexing.builder.SentenceTransformerModel", return_value=mock_model):
         builder = IndexBuilder()
-        builder.build(cfg, config_dir, rebuild=True)
+        builder.build(workspace_config, db_path, rebuild=True)
 
     # Simulate config change to different model
-    cfg2 = load_workspace(workspace_yaml)
-    cfg2.storage.model = "different-model"
+    workspace_config.storage.model = "different-model"
 
     with pytest.raises(ValueError, match="Model changed"):
         with patch("corbell.core.indexing.builder.SentenceTransformerModel", return_value=mock_model):
             builder2 = IndexBuilder()
-            builder2.build(cfg2, config_dir, rebuild=False)
+            builder2.build(workspace_config, db_path, rebuild=False)
 
 
 # ---------------------------------------------------------------------------
 # repo_filter
 # ---------------------------------------------------------------------------
 
-def test_repo_filter_unknown_raises(workspace_yaml):
+def test_repo_filter_unknown_raises(workspace_config, db_path):
     """Passing an unknown repo_filter raises ValueError."""
-    from corbell.core.workspace import load_workspace
-
-    cfg = load_workspace(workspace_yaml)
-    config_dir = workspace_yaml.parent
     mock_model = _make_mock_model()
 
-    with pytest.raises(ValueError, match="not found in workspace.yaml"):
+    with pytest.raises(ValueError, match="not found in workspace config"):
         with patch("corbell.core.indexing.builder.SentenceTransformerModel", return_value=mock_model):
             builder = IndexBuilder()
-            builder.build(cfg, config_dir, rebuild=True, repo_filter="nonexistent")
+            builder.build(workspace_config, db_path, rebuild=True, repo_filter="nonexistent")

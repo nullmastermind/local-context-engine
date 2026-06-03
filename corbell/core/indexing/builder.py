@@ -21,15 +21,15 @@ class IndexBuilder:
     def build(
         self,
         cfg: Any,  # WorkspaceConfig
-        config_dir: Path,
+        db_path: Path,
         rebuild: bool = False,
         repo_filter: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Build or incrementally update the code search index.
 
         Args:
-            cfg: Parsed WorkspaceConfig.
-            config_dir: Directory containing workspace.yaml (used to resolve DB path).
+            cfg: WorkspaceConfig (from build_config()).
+            db_path: Absolute path to the SQLite database file.
             rebuild: If True, clears all tables and does a full rebuild.
             repo_filter: If set, only process the repo with this ID.
 
@@ -44,7 +44,6 @@ class IndexBuilder:
         from corbell.core.embeddings.sqlite_store import SQLiteEmbeddingStore
         from corbell.core.graph.sqlite_store import SQLiteGraphStore
 
-        db_path = cfg.db_path(config_dir)
         emb_store = SQLiteEmbeddingStore(db_path)
         graph_store = SQLiteGraphStore(db_path)
         tracker = IndexTracker(db_path)
@@ -54,7 +53,7 @@ class IndexBuilder:
         if repo_filter:
             repos = [r for r in repos if r.id == repo_filter]
             if not repos:
-                raise ValueError(f"Repo '{repo_filter}' not found in workspace.yaml")
+                raise ValueError(f"Repo '{repo_filter}' not found in workspace config")
 
         model_name = cfg.storage.resolved_model()
 

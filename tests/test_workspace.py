@@ -1,196 +1,279 @@
-"""Tests for core/workspace.py — new repos-based schema."""
+"""Tests for core/workspace.py — env-var driven config, path helpers."""
 
-import pytest
-import yaml
+from __future__ import annotations
+
+from pathlib import Path
 
 from corbell.core.workspace import (
-    find_workspace_root,
-    init_workspace_yaml,
-    load_workspace,
+    build_config,
+    db_path_for_workspace,
+    sanitize_path,
 )
 
 
-def test_load_workspace_basic(sample_workspace_yaml, sample_repo):
-    cfg = load_workspace(sample_workspace_yaml)
-    assert cfg.workspace.name == "test-platform"
-    assert len(cfg.repos) == 1
-    assert cfg.repos[0].id == "sample-service"
-    assert cfg.repos[0].resolved_path == sample_repo
+# ---------------------------------------------------------------------------
+# sanitize_path
+# ---------------------------------------------------------------------------
+
+def test_sanitize_path_linux_style(tmp_path):
+    """Linux absolute path is sanitized correctly."""
+    # Construct a fake Linux-style path string and test normalization
+    p = Path("/home/user/projects/my-app")
+    result = sanitize_path(p)
+    # Leading slash becomes a leading dash which is then stripped
+    assert "home" in result
+    assert "user" in result
+    assert "projects" in result
+    assert "my-app" in result
+    assert not result.startswith("-")
 
 
-def test_load_workspace_from_dir(sample_workspace_yaml):
-    cfg = load_workspace(sample_workspace_yaml.parent)
-    assert cfg.workspace.name == "test-platform"
+def test_sanitize_path_trailing_separator(tmp_path):
+    """Trailing separator is stripped before sanitization."""
+    p = tmp_path / "my-app"
+    p.mkdir()
+    result_no_sep = sanitize_path(p)
+    # Even if the path string has trailing slash, resolved() removes it
+    result_with_sep = sanitize_path(Path(str(p) + "/"))
+    assert result_no_sep == result_with_sep
 
 
-def test_load_workspace_not_found(tmp_path):
-    with pytest.raises(FileNotFoundError):
-        load_workspace(tmp_path / "nonexistent" / "workspace.yaml")
+def test_sanitize_path_no_leading_dash(tmp_path):
+    """Result never starts with a dash."""
+    result = sanitize_path(tmp_path)
+    assert not result.startswith("-")
 
 
-def test_init_workspace_yaml(tmp_path):
-    out = init_workspace_yaml(tmp_path)
-    assert out.exists()
-    raw = yaml.safe_load(out.read_text())
-    assert "repos" in raw
-    assert raw["workspace"]["name"] == "my-platform"
+def test_sanitize_path_replaces_separators(tmp_path):
+    """Path separators are replaced with dashes."""
+    result = sanitize_path(tmp_path)
+    assert "/" not in result
+    assert "\\" not in result
+    assert ":" not in result
 
 
-def test_init_workspace_yaml_overwrite(tmp_path):
-    out1 = init_workspace_yaml(tmp_path)
-    out2 = init_workspace_yaml(tmp_path)
-    assert out1 == out2
+def test_sanitize_path_distinct_paths_produce_distinct_names(tmp_path):
+    """Two different paths produce different sanitized names."""
+    p1 = tmp_path / "repo-a"
+    p1.mkdir()
+    p2 = tmp_path / "repo-b"
+    p2.mkdir()
+    assert sanitize_path(p1) != sanitize_path(p2)
 
 
-def test_find_workspace_root(tmp_path, sample_workspace_yaml):
-    # Should find from inside the workspace dir
-    root = find_workspace_root(sample_workspace_yaml.parent)
-    assert root is not None
+def test_sanitize_path_consistent_for_same_path(tmp_path):
+    """Same physical directory always produces the same sanitized name."""
+    p = tmp_path / "my-project"
+    p.mkdir()
+    assert sanitize_path(p) == sanitize_path(p)
 
 
-def test_find_workspace_root_not_found(tmp_path):
-    isolated = tmp_path / "isolated"
-    isolated.mkdir()
-    assert find_workspace_root(isolated) is None
+# ---------------------------------------------------------------------------
+# db_path_for_workspace
+# ---------------------------------------------------------------------------
+
+def test_db_path_for_workspace_location(tmp_path, monkeypatch):
+    """DB is placed under ~/.vibervn/context-engine/{sanitized}/workspace.db."""
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
+
+    workspace = tmp_path / "my-project"
+    workspace.mkdir()
+
+    db = db_path_for_workspace(workspace)
+    assert db.name == "workspace.db"
+    assert db.parent.parent.name == "context-engine"
+    assert db.parent.parent.parent.name == ".vibervn"
+    # The workspace-named dir should contain the sanitized path segment
+    assert sanitize_path(workspace) == db.parent.name
 
 
-def test_llm_config_resolved_api_key(tmp_path, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
-    config_dir = tmp_path / "corbell"
-    config_dir.mkdir()
-    ws = config_dir / "workspace.yaml"
-    ws.write_text("""\
-version: "1"
-workspace:
-  name: test
-repos: []
-llm:
-  provider: anthropic
-  model: claude-sonnet-4-5
-""")
-    cfg = load_workspace(ws)
-    assert cfg.llm.resolved_api_key() == "sk-test-123"
+def test_db_path_creates_parent_dirs(tmp_path, monkeypatch):
+    """Parent directories are created automatically."""
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
 
+    workspace = tmp_path / "new-project"
+    workspace.mkdir()
 
-def test_db_path_creates_parent(sample_workspace_yaml, tmp_path):
-    cfg = load_workspace(sample_workspace_yaml)
-    db = cfg.db_path(sample_workspace_yaml.parent)
+    db = db_path_for_workspace(workspace)
     assert db.parent.exists()
 
 
-def test_detect_language(tmp_path):
-    from corbell.core.workspace import _detect_language
+def test_db_path_idempotent(tmp_path, monkeypatch):
+    """Calling db_path_for_workspace twice returns the same path."""
+    fake_home = tmp_path / "fake-home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: fake_home))
 
-    # Test typescript
-    ts_dir = tmp_path / "ts-proj"
-    ts_dir.mkdir()
-    (ts_dir / "package.json").touch()
-    assert _detect_language(ts_dir) == "typescript"
+    workspace = tmp_path / "my-project"
+    workspace.mkdir()
 
-    # Test python
-    py_dir = tmp_path / "py-proj"
-    py_dir.mkdir()
-    (py_dir / "requirements.txt").touch()
-    assert _detect_language(py_dir) == "python"
-
-    # Test java
-    java_dir = tmp_path / "java-proj"
-    java_dir.mkdir()
-    (java_dir / "pom.xml").touch()
-    assert _detect_language(java_dir) == "java"
-
-    # Test unknown fallback
-    unk_dir = tmp_path / "unknown-proj"
-    unk_dir.mkdir()
-    assert _detect_language(unk_dir) == "python"
+    assert db_path_for_workspace(workspace) == db_path_for_workspace(workspace)
 
 
-def test_detect_repos_monorepo(tmp_path):
-    from corbell.core.workspace import _detect_repos
+# ---------------------------------------------------------------------------
+# build_config — defaults
+# ---------------------------------------------------------------------------
 
-    target_dir = tmp_path / "monorepo"
-    target_dir.mkdir()
-
-    # Service 1
-    s1 = target_dir / "service1"
-    s1.mkdir()
-    (s1 / "package.json").touch()
-
-    # Service 2
-    s2 = target_dir / "api"
-    s2.mkdir()
-    (s2 / "requirements.txt").touch()
-
-    repos = _detect_repos(target_dir)
-    assert len(repos) == 2
-
-    repos.sort(key=lambda r: r["id"])
-
-    assert repos[0]["id"] == "api"
-    assert repos[0]["language"] == "python"
-    assert repos[0]["path"] == "../api"
-
-    assert repos[1]["id"] == "service1"
-    assert repos[1]["language"] == "typescript"
-    assert repos[1]["path"] == "../service1"
+def _clear_corbell_env(monkeypatch):
+    """Remove all CORBELL_* env vars that might affect config."""
+    for var in (
+        "CORBELL_TOP_K", "CORBELL_CHUNK_SIZE", "CORBELL_CHUNK_OVERLAP",
+        "CORBELL_EXPAND_CALL_DEPTH", "CORBELL_EXPAND_MAX_CHUNKS",
+        "CORBELL_RERANK", "CORBELL_EMBEDDING_MODEL", "CORBELL_MAX_FILE_BYTES",
+        "CORBELL_SKIP_DIRS", "CORBELL_LLM_MODEL",
+    ):
+        monkeypatch.delenv(var, raising=False)
 
 
-def test_detect_repos_single_repo(tmp_path):
-    from corbell.core.workspace import _detect_repos
+def test_build_config_defaults(tmp_path, monkeypatch):
+    """build_config() uses spec-defined defaults when no env vars set."""
+    _clear_corbell_env(monkeypatch)
+    workspace = tmp_path / "my-project"
+    workspace.mkdir()
 
-    target_dir = tmp_path / "my-api"
-    target_dir.mkdir()
-    (target_dir / "go.mod").touch()
-    (target_dir / ".git").mkdir()
+    cfg = build_config(workspace)
 
-    repos = _detect_repos(target_dir)
-    assert len(repos) == 1
-    assert repos[0]["id"] == "my-api"
-    assert repos[0]["language"] == "go"
-    assert repos[0]["path"] == ".."
+    assert cfg.query.top_k == 50
+    assert cfg.indexing.chunk_size == 50
+    assert cfg.indexing.chunk_overlap == 10
+    assert cfg.query.expand_call_depth == 2
+    assert cfg.query.expand_max_chunks == 30
+    assert cfg.query.rerank is True
+    assert cfg.storage.model == "all-MiniLM-L6-v2"
+    assert cfg.indexing.max_file_bytes == 1048576
+    assert cfg.indexing.skip_dirs == []
 
 
-def test_workspace_config_new_fields(tmp_path):
-    """Verify new QueryConfig, IndexingConfig are parsed correctly."""
-    config_dir = tmp_path / "corbell"
-    config_dir.mkdir()
-    ws = config_dir / "workspace.yaml"
-    ws.write_text("""\
-version: "1"
-workspace:
-  name: test
-repos: []
-query:
-  top_k: 20
-  expand_call_depth: 3
-  rerank: false
-indexing:
-  chunk_size: 100
-  chunk_overlap: 20
-  max_file_bytes: 512000
-""")
-    cfg = load_workspace(ws)
+def test_build_config_single_repo(tmp_path, monkeypatch):
+    """build_config() creates exactly one repo with workspace_path as root."""
+    _clear_corbell_env(monkeypatch)
+    workspace = tmp_path / "my-project"
+    workspace.mkdir()
+
+    cfg = build_config(workspace)
+
+    assert len(cfg.repos) == 1
+    repo = cfg.repos[0]
+    assert repo.id == "my-project"
+    assert repo.resolved_path == workspace
+
+
+def test_build_config_repo_id_is_basename(tmp_path, monkeypatch):
+    """Repo ID is the workspace directory basename."""
+    _clear_corbell_env(monkeypatch)
+    workspace = tmp_path / "awesome-service"
+    workspace.mkdir()
+
+    cfg = build_config(workspace)
+    assert cfg.repos[0].id == "awesome-service"
+
+
+# ---------------------------------------------------------------------------
+# build_config — env var overrides
+# ---------------------------------------------------------------------------
+
+def test_build_config_top_k_override(tmp_path, monkeypatch):
+    """CORBELL_TOP_K overrides default."""
+    _clear_corbell_env(monkeypatch)
+    monkeypatch.setenv("CORBELL_TOP_K", "20")
+    workspace = tmp_path / "proj"
+    workspace.mkdir()
+
+    cfg = build_config(workspace)
     assert cfg.query.top_k == 20
-    assert cfg.query.expand_call_depth == 3
-    assert cfg.query.rerank is False
+
+
+def test_build_config_chunk_size_override(tmp_path, monkeypatch):
+    """CORBELL_CHUNK_SIZE overrides default."""
+    _clear_corbell_env(monkeypatch)
+    monkeypatch.setenv("CORBELL_CHUNK_SIZE", "100")
+    workspace = tmp_path / "proj"
+    workspace.mkdir()
+
+    cfg = build_config(workspace)
     assert cfg.indexing.chunk_size == 100
-    assert cfg.indexing.chunk_overlap == 20
+
+
+def test_build_config_rerank_false(tmp_path, monkeypatch):
+    """CORBELL_RERANK=false disables reranking."""
+    _clear_corbell_env(monkeypatch)
+    monkeypatch.setenv("CORBELL_RERANK", "false")
+    workspace = tmp_path / "proj"
+    workspace.mkdir()
+
+    cfg = build_config(workspace)
+    assert cfg.query.rerank is False
+
+
+def test_build_config_skip_dirs(tmp_path, monkeypatch):
+    """CORBELL_SKIP_DIRS is parsed as comma-separated list."""
+    _clear_corbell_env(monkeypatch)
+    monkeypatch.setenv("CORBELL_SKIP_DIRS", "node_modules,dist,.git")
+    workspace = tmp_path / "proj"
+    workspace.mkdir()
+
+    cfg = build_config(workspace)
+    assert cfg.indexing.skip_dirs == ["node_modules", "dist", ".git"]
+
+
+def test_build_config_embedding_model_override(tmp_path, monkeypatch):
+    """CORBELL_EMBEDDING_MODEL overrides default model."""
+    _clear_corbell_env(monkeypatch)
+    monkeypatch.setenv("CORBELL_EMBEDDING_MODEL", "my-custom-model")
+    workspace = tmp_path / "proj"
+    workspace.mkdir()
+
+    cfg = build_config(workspace)
+    assert cfg.storage.resolved_model() == "my-custom-model"
+
+
+def test_build_config_all_env_vars(tmp_path, monkeypatch):
+    """All CORBELL_* env vars from spec are supported."""
+    _clear_corbell_env(monkeypatch)
+    monkeypatch.setenv("CORBELL_TOP_K", "30")
+    monkeypatch.setenv("CORBELL_CHUNK_SIZE", "75")
+    monkeypatch.setenv("CORBELL_CHUNK_OVERLAP", "15")
+    monkeypatch.setenv("CORBELL_EXPAND_CALL_DEPTH", "3")
+    monkeypatch.setenv("CORBELL_EXPAND_MAX_CHUNKS", "20")
+    monkeypatch.setenv("CORBELL_RERANK", "false")
+    monkeypatch.setenv("CORBELL_EMBEDDING_MODEL", "custom-model")
+    monkeypatch.setenv("CORBELL_MAX_FILE_BYTES", "512000")
+    monkeypatch.setenv("CORBELL_SKIP_DIRS", "dist,build")
+
+    workspace = tmp_path / "proj"
+    workspace.mkdir()
+
+    cfg = build_config(workspace)
+    assert cfg.query.top_k == 30
+    assert cfg.indexing.chunk_size == 75
+    assert cfg.indexing.chunk_overlap == 15
+    assert cfg.query.expand_call_depth == 3
+    assert cfg.query.expand_max_chunks == 20
+    assert cfg.query.rerank is False
+    assert cfg.storage.model == "custom-model"
     assert cfg.indexing.max_file_bytes == 512000
+    assert cfg.indexing.skip_dirs == ["dist", "build"]
 
 
-def test_llm_config_resolved_api_key_google(tmp_path, monkeypatch):
+# ---------------------------------------------------------------------------
+# LLMConfig env var resolution (still valid after refactor)
+# ---------------------------------------------------------------------------
+
+def test_llm_resolved_api_key_anthropic(monkeypatch):
+    """Anthropic API key resolved from env var."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
+    from corbell.core.workspace import LLMConfig
+    cfg = LLMConfig(provider="anthropic")
+    assert cfg.resolved_api_key() == "sk-test-123"
+
+
+def test_llm_resolved_api_key_google(monkeypatch):
+    """Google API key resolved from env var."""
     monkeypatch.setenv("GOOGLE_API_KEY", "sk-google-test")
-    config_dir = tmp_path / "corbell"
-    config_dir.mkdir()
-    ws = config_dir / "workspace.yaml"
-    ws.write_text("""\
-version: "1"
-workspace:
-  name: test
-repos: []
-llm:
-  provider: google
-  model: gemini-2.5-flash
-""")
-    cfg = load_workspace(ws)
-    assert cfg.llm.resolved_api_key() == "sk-google-test"
+    from corbell.core.workspace import LLMConfig
+    cfg = LLMConfig(provider="google")
+    assert cfg.resolved_api_key() == "sk-google-test"
