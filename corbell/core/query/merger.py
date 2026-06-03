@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     from corbell.core.query.graph_expander import ScoredChunk
 
 # Maximum number of lines in a merged chunk block
-_MAX_MERGED_LINES = 100
+_MAX_MERGED_LINES = 60
 
 
 def merge_and_dedup(chunks: List["ScoredChunk"]) -> List["ScoredChunk"]:
@@ -18,7 +18,7 @@ def merge_and_dedup(chunks: List["ScoredChunk"]) -> List["ScoredChunk"]:
     1. Deduplicate: for duplicate chunk_ids, keep the one with the highest score.
     2. Group chunks by file path.
     3. Within each file, sort by start_line and merge adjacent/overlapping chunks.
-    4. Cap merged blocks at 100 lines.
+    4. Cap merged blocks at 60 lines.
     5. Remove chunks whose line range is fully contained within another chunk in the same file.
 
     Args:
@@ -61,7 +61,7 @@ def _merge_file_chunks(chunks: List["ScoredChunk"]) -> List["ScoredChunk"]:
 
     Two chunks are merged if next.start_line <= current.end_line + 1.
     The merged chunk gets the max score and a fresh chunk_id combining both.
-    Merged blocks are capped at 100 lines.
+    Merged blocks are capped at 60 lines.
     """
     # Sort by start line
     sorted_chunks = sorted(chunks, key=lambda c: c.start_line)
@@ -75,7 +75,7 @@ def _merge_file_chunks(chunks: List["ScoredChunk"]) -> List["ScoredChunk"]:
     for next_chunk in sorted_chunks[1:]:
         # Check adjacency: next starts before or at current.end + 1
         if next_chunk.start_line <= current.end_line + 1:
-            # Check if merging would exceed 100-line cap
+            # Check if merging would exceed 60-line cap
             merged_lines = next_chunk.end_line - current.start_line + 1
             if merged_lines <= _MAX_MERGED_LINES:
                 # Merge: extend current to cover next_chunk
