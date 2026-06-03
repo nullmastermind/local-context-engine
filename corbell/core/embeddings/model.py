@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from abc import ABC, abstractmethod
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class EmbeddingModel(ABC):
@@ -64,6 +67,11 @@ def _is_google_key_error(e: Exception) -> bool:
         msg = (getattr(e, "message", None) or str(e)).lower()
         return "api key" in msg
     return False
+
+
+def _is_rate_limit_error(e: Exception) -> bool:
+    """Return True when a Google API error is a 429 RESOURCE_EXHAUSTED rate limit."""
+    return getattr(e, "code", None) == 429
 
 
 def _parse_gemini_version(model_name: str) -> int:
@@ -152,8 +160,8 @@ class GoogleEmbeddingModel(EmbeddingModel):
         return content
 
     _BATCH_SIZE = 100
-    _MAX_RETRIES = 6
     _BASE_DELAY = 2.0
+    _MAX_BACKOFF = 60.0
 
     def encode(self, texts: List[str], task_type: str = "RETRIEVAL_DOCUMENT") -> List[List[float]]:
         """Encode a list of texts into embedding vectors.
@@ -189,12 +197,22 @@ class GoogleEmbeddingModel(EmbeddingModel):
     def _embed_batch_with_retry(
         self, contents, task_type: str, genai, types
     ) -> List[List[float]]:
-        """Embed a single batch, rotating keys and retrying on rate limit."""
+        """Embed a single batch, rotating keys and retrying on rate limit.
+
+        - If all keys fail with 429 (rate limit), waits with capped exponential
+          backoff and retries indefinitely until the quota is restored.
+        - If any key fails with a non-key error, raises immediately.
+        - If all keys fail with auth errors (401/403/400+apikey), raises immediately.
+        """
         import time
 
         start = self._key_index
-        for attempt in range(self._MAX_RETRIES):
+        rate_limit_attempt = 0
+
+        while True:
             errors: List[str] = []
+            all_rate_limited = True
+
             for i in range(len(self._api_keys)):
                 idx = (start + i) % len(self._api_keys)
                 key = self._api_keys[idx]
@@ -212,17 +230,30 @@ class GoogleEmbeddingModel(EmbeddingModel):
                     return [emb.values for emb in result.embeddings]
                 except Exception as e:
                     if _is_google_key_error(e):
+                        if not _is_rate_limit_error(e):
+                            # Auth failure (401/403/400+apikey) — not a transient error
+                            all_rate_limited = False
                         errors.append(f"key[{idx}]: {e}")
                         continue
                     raise
 
-            delay = self._BASE_DELAY * (2 ** attempt)
-            time.sleep(delay)
+            if not all_rate_limited:
+                raise RuntimeError(
+                    f"All {len(self._api_keys)} Google API key(s) failed with auth errors:\n"
+                    + "\n".join(errors)
+                )
 
-        raise RuntimeError(
-            f"All {len(self._api_keys)} Google API key(s) failed after "
-            f"{self._MAX_RETRIES} retries:\n" + "\n".join(errors)
-        )
+            # All keys are rate-limited (429) — wait and retry indefinitely
+            delay = min(self._BASE_DELAY * (2 ** rate_limit_attempt), self._MAX_BACKOFF)
+            rate_limit_attempt += 1
+            logger.warning(
+                "All %d Google API key(s) rate-limited (429). "
+                "Retrying in %.0fs (attempt %d)...",
+                len(self._api_keys),
+                delay,
+                rate_limit_attempt,
+            )
+            time.sleep(delay)
 
     @property
     def dimension(self) -> int:
