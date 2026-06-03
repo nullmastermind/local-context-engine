@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 from typing import Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -119,7 +120,7 @@ class LLMClient:
         if self.provider == "google":
             raw = self._api_key or ""
             self._google_keys: list[str] = [k.strip() for k in raw.split(",") if k.strip()]
-            self._google_key_index: int = 0
+            self._google_key_index: int = random.randrange(len(self._google_keys))
         else:
             self._google_keys = []
             self._google_key_index = 0

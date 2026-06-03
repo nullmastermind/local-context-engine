@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
@@ -123,7 +124,7 @@ class GoogleEmbeddingModel(EmbeddingModel):
                 "  export GOOGLE_API_KEY=AIza...\n"
                 "Or use a local embedding model (e.g. all-MiniLM-L6-v2) in storage.model."
             )
-        self._key_index: int = 0
+        self._key_index: int = random.randrange(len(self._api_keys))
         # kept for backwards-compat with tests that read _api_key directly
         self._api_key: str = self._api_keys[0]
 
