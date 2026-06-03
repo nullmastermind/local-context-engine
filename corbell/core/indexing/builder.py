@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from corbell.core.gitignore import load_gitignore
 from corbell.core.indexing.tracker import IndexTracker
 
 
@@ -139,10 +140,14 @@ class IndexBuilder:
                 "tags": [],
             })
 
+            # Load gitignore once per repo, share with extractor
+            gitignore_spec = load_gitignore(repo_path)
+
             # Extract and embed chunks
             chunks = extractor.extract_from_repo(
                 repo_path, repo_id,
                 max_file_bytes=indexing.max_file_bytes,
+                gitignore_spec=gitignore_spec,
             )
             if chunks:
                 texts = [c.content for c in chunks]

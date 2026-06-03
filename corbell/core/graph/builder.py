@@ -11,6 +11,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import pathspec
+
 from corbell.core.graph.schema import (
     DataStoreNode,
     DependencyEdge,
@@ -18,6 +20,7 @@ from corbell.core.graph.schema import (
     QueueNode,
     ServiceNode,
 )
+from corbell.core.gitignore import load_gitignore
 
 # ---------------------------------------------------------------------------
 # Service pattern detection rules
@@ -274,7 +277,8 @@ class ServiceGraphBuilder:
                 continue
 
             # Gather all relevant files first so we can sniff the service type
-            files = list(self._iter_files(repo_path, language))
+            gitignore_spec = load_gitignore(repo_path)
+            files = list(self._iter_files(repo_path, language, gitignore_spec))
             service_type = self._detect_service_type(files, language)
 
             node = ServiceNode(
@@ -368,13 +372,23 @@ class ServiceGraphBuilder:
         
         return "service"
 
-    def _iter_files(self, repo_path: Path, language: str):
+    def _iter_files(
+        self,
+        repo_path: Path,
+        language: str,
+        gitignore_spec: Optional[pathspec.PathSpec] = None,
+    ):
         """Yield all scannable files in a repo."""
+        if gitignore_spec is None:
+            gitignore_spec = load_gitignore(repo_path)
         manifests = {"package.json", "requirements.txt", "go.mod", "pom.xml", "build.gradle"}
         for fp in repo_path.rglob("*"):
             if not fp.is_file():
                 continue
             if self._should_skip(fp):
+                continue
+            rel = fp.relative_to(repo_path)
+            if gitignore_spec.match_file(str(rel).replace("\\", "/")):
                 continue
             if fp.name in manifests:
                 yield fp

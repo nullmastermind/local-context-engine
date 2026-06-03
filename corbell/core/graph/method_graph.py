@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from corbell.core.graph.schema import DependencyEdge, GraphStore, MethodNode
+from corbell.core.gitignore import load_gitignore
 
 # ---------------------------------------------------------------------------
 # Tree-sitter setup (optional dependency)
@@ -314,12 +315,17 @@ class MethodGraphBuilder:
         all_calls: List[Dict] = []
         files_scanned = 0
 
+        gitignore_spec = load_gitignore(Path(repo_path))
+
         for fp in Path(repo_path).rglob("*"):
             if not fp.is_file():
                 continue
             # Only skip if the immediate parent directory name is in SKIP_DIRS
             # (avoids false-positives from matching path segments like 'corbel')
-            if any(part in _SKIP_DIRS for part in fp.relative_to(repo_path).parts):
+            rel = fp.relative_to(repo_path)
+            if any(part in _SKIP_DIRS for part in rel.parts):
+                continue
+            if gitignore_spec.match_file(str(rel).replace("\\", "/")):
                 continue
             lang = _EXT_LANG.get(fp.suffix)
             if not lang:

@@ -11,7 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
+import pathspec
+
 from corbell.core.constants import EXTENSION_LANG as _SUPPORTED, SKIP_DIRS as _SKIP_DIRS
+from corbell.core.gitignore import load_gitignore
 
 
 @dataclass
@@ -53,6 +56,7 @@ class CodeChunkExtractor:
         repo_path: Path | str,
         service_id: str,
         max_file_bytes: int = 1024 * 1024,
+        gitignore_spec: Optional[pathspec.PathSpec] = None,
     ) -> List[EmbeddingRecord]:
         """Walk a repo and extract all code chunks.
 
@@ -60,11 +64,15 @@ class CodeChunkExtractor:
             repo_path: Root directory of the repository.
             service_id: ID of the owning service.
             max_file_bytes: Skip files larger than this.
+            gitignore_spec: Pre-loaded PathSpec for gitignore filtering.
+                If None, it is loaded from the repo automatically.
 
         Returns:
             List of :class:`EmbeddingRecord` ready for embedding.
         """
         repo_path = Path(repo_path)
+        if gitignore_spec is None:
+            gitignore_spec = load_gitignore(repo_path)
         records: List[EmbeddingRecord] = []
 
         for fp in repo_path.rglob("*"):
@@ -76,6 +84,8 @@ class CodeChunkExtractor:
             if not lang:
                 continue
             rel = str(fp.relative_to(repo_path))
+            if gitignore_spec.match_file(rel.replace("\\", "/")):
+                continue
             chunks = self._extract_file(fp, rel, lang, service_id, str(repo_path))
             records.extend(chunks)
 

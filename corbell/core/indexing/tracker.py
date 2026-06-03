@@ -133,6 +133,7 @@ class IndexTracker:
             StaleResult with added, modified, deleted lists of (file_path, repo_id).
         """
         from corbell.core.constants import EXTENSION_LANG, SKIP_DIRS
+        from corbell.core.gitignore import load_gitignore
         from corbell.core.workspace import IndexingConfig
 
         indexing: IndexingConfig = config.indexing
@@ -159,12 +160,17 @@ class IndexTracker:
             if not repo_path or not repo_path.exists():
                 continue
 
+            gitignore_spec = load_gitignore(repo_path)
+
             for fp in repo_path.rglob("*"):
                 if not fp.is_file():
                     continue
                 # Check skip dirs
                 rel = fp.relative_to(repo_path)
                 if any(part in all_skip for part in rel.parts):
+                    continue
+                # Check gitignore
+                if gitignore_spec.match_file(str(rel).replace("\\", "/")):
                     continue
                 # Check extension
                 if fp.suffix not in EXTENSION_LANG:
