@@ -1,107 +1,144 @@
-"""MCP Server implementation for Corbell.
+"""MCP Server for Corbell code retrieval engine.
 
-Exposes Corbell's architecture graph, code embeddings, and spec tools
-as MCP tools for external AI platforms (Cursor, Claude Desktop, Antigravity).
+Exposes a single tool `context_engine_codebase_retrieval` via FastMCP,
+supporting both stdio and SSE transports.
 """
 
-import sys
+from __future__ import annotations
+
 import asyncio
+import os
+import sys
+from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
 
-from corbell.core.mcp.models import GraphQueryRequest, SpecContextRequest
-from corbell.core.mcp.tools import (
-    handle_graph_query,
-    handle_get_architecture_context,
-    handle_code_search,
-    handle_list_services,
-)
 
-
-# Create the FastMCP Server
+# Create the FastMCP server
 mcp = FastMCP("corbell", dependencies=["corbell"])
 
 
-@mcp.custom_route("/", methods=["GET"])
-async def _root(request):
-    from starlette.responses import JSONResponse
-    return JSONResponse({
-        "name": "Corbell MCP Server",
-        "status": "running",
-        "sse_endpoint": "/sse",
-        "docs": "Connect your MCP client to /sse",
-    })
-
-
 # ---------------------------------------------------------------------------
-# Tool 1: graph_query (existing)
+# Tool: context_engine_codebase_retrieval
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-def graph_query(service_id: str, include_dependencies: bool = True, include_methods: bool = False) -> str:
-    """Query Corbell's architecture graph for service dependencies and details.
-    
+def context_engine_codebase_retrieval(
+    query: str,
+    workspace_full_path: str = "",
+    top_k: int = 50,
+    rerank: bool = True,
+) -> str:
+    """Search the indexed codebase and return relevant code snippets.
+
+    Returns formatted code blocks with absolute file paths and line numbers,
+    ready for injection into an LLM context window.
+
     Args:
-        service_id: The ID of the service to query.
-        include_dependencies: Whether to include upstream/downstream dependencies.
-        include_methods: Whether to include code-level extracted methods.
+        query: Natural language description of the code you're looking for.
+        workspace_full_path: Full path to workspace.yaml or its directory.
+            If empty, auto-detects from CORBELL_WORKSPACE env var or CWD.
+        top_k: Maximum number of code chunks to return (default 50).
+        rerank: Whether to use LLM reranking for better relevance (default true).
+
+    Returns:
+        Formatted code snippets, or an error string on failure.
     """
-    req = GraphQueryRequest(
-        service_id=service_id, 
-        include_dependencies=include_dependencies, 
-        include_methods=include_methods
-    )
-    return handle_graph_query(req)
+    try:
+        workspace_path = _resolve_workspace(workspace_full_path)
+        if workspace_path is None:
+            return (
+                "Error: workspace.yaml not found. "
+                "Pass workspace_full_path or set CORBELL_WORKSPACE env var."
+            )
+
+        from pathlib import Path
+        from corbell.core.workspace import load_workspace
+        from corbell.core.embeddings.sqlite_store import SQLiteEmbeddingStore
+        from corbell.core.indexing.tracker import IndexTracker
+        from corbell.core.indexing.builder import IndexBuilder
+
+        ws_path = Path(workspace_path)
+        config_dir = ws_path if ws_path.is_dir() else ws_path.parent
+
+        try:
+            cfg = load_workspace(ws_path)
+        except FileNotFoundError:
+            return (
+                f"Error: workspace.yaml not found at {ws_path}. "
+                "Run 'corbell init' first."
+            )
+        except Exception as exc:
+            return f"Error: Failed to load workspace config: {exc}"
+
+        db_path = cfg.db_path(config_dir)
+
+        try:
+            emb_store = SQLiteEmbeddingStore(db_path)
+        except Exception:
+            return (
+                f"Error: Database corrupted at {db_path}. "
+                "Run 'corbell index build --rebuild' to recreate."
+            )
+
+        # Check index status
+        try:
+            chunk_count = emb_store.count()
+        except Exception:
+            return (
+                f"Error: Database corrupted at {db_path}. "
+                "Run 'corbell index build --rebuild' to recreate."
+            )
+
+        if chunk_count == 0:
+            return "No index found. Run 'corbell index build' from terminal first."
+
+        # Blocking incremental rebuild if stale (MCP never does full build)
+        tracker = IndexTracker(db_path)
+        stale_result = tracker.get_stale_files(cfg.repos, cfg)
+        if stale_result.has_changes:
+            try:
+                builder = IndexBuilder()
+                builder.build(cfg, config_dir, rebuild=False)
+            except Exception:
+                # Non-fatal: proceed with current index
+                pass
+
+        # Run the retrieval pipeline
+        from corbell.core.query.engine import codebase_retrieval
+
+        result = codebase_retrieval(
+            query=query,
+            workspace_path=ws_path,
+            top_k=top_k,
+            use_llm=True,
+            rerank=rerank,
+        )
+
+        return result
+
+    except Exception as exc:
+        return f"Error: Unexpected failure in codebase_retrieval: {exc}"
 
 
-# ---------------------------------------------------------------------------
-# Tool 2: get_architecture_context (existing)
-# ---------------------------------------------------------------------------
+def _resolve_workspace(workspace_full_path: str) -> Optional[str]:
+    """Resolve the workspace path from parameter, env var, or CWD."""
+    # 1. Explicit path provided
+    if workspace_full_path and workspace_full_path.strip():
+        return workspace_full_path.strip()
 
-@mcp.tool()
-def get_architecture_context(feature_description: str, top_k_services: int = 10) -> str:
-    """Get architecture and code context for a feature without LLM generation.
-    
-    Args:
-        feature_description: The feature description to get context for.
-        top_k_services: Maximum number of relevant code chunks to return.
-    """
-    req = SpecContextRequest(feature_description=feature_description, top_k_services=top_k_services)
-    return handle_get_architecture_context(req)
+    # 2. Environment variable
+    env_path = os.environ.get("CORBELL_WORKSPACE")
+    if env_path:
+        return env_path
 
+    # 3. Walk up from CWD
+    from corbell.core.workspace import find_workspace_root
+    found = find_workspace_root()
+    if found:
+        return str(found / "workspace.yaml")
 
-# ---------------------------------------------------------------------------
-# Tool 3: code_search (new)
-# ---------------------------------------------------------------------------
-
-@mcp.tool()
-def code_search(query: str, service_id: str = "", top_k: int = 10) -> str:
-    """Semantic search across Corbell's code embedding index.
-    
-    Returns the most relevant code chunks matching the query, ranked by
-    cosine similarity. Useful for finding implementations, patterns, and
-    code examples across the workspace.
-    
-    Args:
-        query: Natural language search query (e.g. "database connection pooling").
-        service_id: Optional service ID to restrict search to a single service.
-        top_k: Maximum number of results to return (default 10).
-    """
-    return handle_code_search(query, service_id=service_id or None, top_k=top_k)
-
-
-# ---------------------------------------------------------------------------
-# Tool 4: list_services (new)
-# ---------------------------------------------------------------------------
-
-@mcp.tool()
-def list_services() -> str:
-    """List all services in the current Corbell workspace graph.
-    
-    Returns a summary of every service discovered by `corbell graph build`,
-    including language, type, tags, and dependency count.
-    """
-    return handle_list_services()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -110,13 +147,13 @@ def list_services() -> str:
 
 class _FilteredStdin:
     """Async iterator over stdin that silently drops empty/whitespace lines.
-    
+
     The MCP SDK's stdio transport passes every raw line from sys.stdin to
-    Pydantic's JSONRPCMessage.model_validate_json(). Empty newlines ('\\n')
-    fail validation and crash the server. This wrapper filters them out.
+    Pydantic's JSONRPCMessage.model_validate_json(). Empty newlines fail
+    validation and crash the server. This wrapper filters them out.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._reader = None
 
     def __aiter__(self):
@@ -139,7 +176,7 @@ class _FilteredStdin:
 
 def serve(transport: str = "stdio", port: int = 8000) -> None:
     """Run the MCP server.
-    
+
     Args:
         transport: 'stdio' for pipe-based IDE integration, 'sse' for HTTP server.
         port: Port number for SSE transport (ignored for stdio).

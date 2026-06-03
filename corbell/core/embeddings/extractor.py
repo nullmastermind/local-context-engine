@@ -11,26 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
-_SKIP_DIRS = {
-    ".git", "__pycache__", "node_modules", "venv", "env", ".venv",
-    ".pytest_cache", "dist", "build", "coverage", ".tox",
-}
-_SUPPORTED = {
-    ".py": "python",
-    ".js": "javascript",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".jsx": "javascript",
-    ".java": "java",
-    ".go": "go",
-    ".rb": "ruby",
-    ".php": "php",
-    ".cs": "csharp",
-    ".md": "markdown",
-    ".yml": "yaml",
-    ".yaml": "yaml",
-    ".json": "json",
-}
+from corbell.core.constants import EXTENSION_LANG as _SUPPORTED, SKIP_DIRS as _SKIP_DIRS
 
 
 @dataclass

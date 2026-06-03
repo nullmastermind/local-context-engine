@@ -1,12 +1,14 @@
-"""Shared test fixtures for Corbell OSS."""
+"""Shared test fixtures for Corbell code retrieval engine."""
 
 from __future__ import annotations
 
+import hashlib
 import textwrap
 from pathlib import Path
 from typing import List
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 
@@ -75,7 +77,7 @@ def sample_repo(tmp_path) -> Path:
 
 @pytest.fixture
 def sample_workspace_yaml(tmp_path, sample_repo) -> Path:
-    """Write a valid workspace.yaml into tmp_path/corbell/."""
+    """Write a valid workspace.yaml into tmp_path/corbell/ using new repos schema."""
     ws_dir = tmp_path / "corbell"
     ws_dir.mkdir()
     yaml_content = f"""\
@@ -84,27 +86,30 @@ workspace:
   name: test-platform
   root: ..
 
-services:
+repos:
   - id: sample-service
-    repo: {sample_repo}
+    path: {sample_repo}
     language: python
-    tags: [core]
 
 storage:
-  graph:
-    backend: sqlite
-    path: .corbell/test.db
-  embeddings:
-    backend: sqlite
-    path: .corbell/test.db
+  path: .corbell/test.db
   model: all-MiniLM-L6-v2
 
-spec:
-  output_dir: specs/
+query:
+  top_k: 50
+  expand_call_depth: 2
+  expand_max_chunks: 30
+  rerank: false
+
+indexing:
+  skip_dirs: []
+  max_file_bytes: 1048576
+  chunk_size: 50
+  chunk_overlap: 10
 
 llm:
   provider: anthropic
-  model: claude-sonnet-4-5-20250929
+  model: claude-sonnet-4-5
 """
     ws_file = ws_dir / "workspace.yaml"
     ws_file.write_text(yaml_content)
@@ -113,148 +118,39 @@ llm:
 
 @pytest.fixture
 def mock_llm():
-    """Return a mock LLMClient that returns a canned design doc."""
+    """Return a mock LLMClient that returns deterministic responses."""
     m = MagicMock()
     m.is_configured = True
-    m.call.return_value = textwrap.dedent("""\
-        # Feature: Test Feature
-
-        ## Context
-        This tests the design generator.
-
-        ## Current Architecture
-        <!-- CORBELL_GRAPH_START -->
-        graph here
-        <!-- CORBELL_GRAPH_END -->
-
-        ## Proposed Design
-        ### Service Changes
-        Add endpoint to sample-service.
-
-        ### Data Flow
-        ```mermaid
-        sequenceDiagram
-            actor User
-            participant SampleService
-            User->>SampleService: POST /feature
-        ```
-
-        ### Failure Modes and Mitigations
-        - Timeout: retry 3x with exponential backoff.
-
-        ## Reliability and Risk Constraints
-        <!-- CORBELL_CONSTRAINTS_START -->
-        <!-- CORBELL_CONSTRAINTS_END -->
-
-        ## Rollout Plan
-        Phase 1: feature flag 10% canary.
-    """)
+    m.call.return_value = '["chunk_id_1", "chunk_id_2"]'
     return m
 
 
 @pytest.fixture
-def sample_spec(tmp_path) -> Path:
-    """Write a valid spec file for testing."""
-    spec_dir = tmp_path / "specs"
-    spec_dir.mkdir()
-    spec_file = spec_dir / "test-feature.md"
-    spec_file.write_text(textwrap.dedent("""\
-        ---
-        id: test-feature
-        title: Test Feature
-        status: draft
-        services:
-          primary: sample-service
-          related: []
-        author: tester
-        review:
-          status: null
-          reviewed_by: null
-          reviewed_at: null
-          completeness_score: null
-          review_report_path: null
-        decomposition:
-          status: null
-          task_file: null
-          linear_synced: false
-          notion_synced: false
-        constraints:
-          manual: []
-          incident_derived: []
-        ---
+def mock_embedding_model():
+    """Return a mock embedding model that produces deterministic hash-based vectors.
 
-        ## Context
+    Each text gets a 384-dim vector derived from its MD5 hash, normalized to
+    unit length. This ensures different texts get different vectors, and the
+    same text always gets the same vector.
+    """
+    dim = 384
 
-        This is a test spec for a feature.
+    def _encode(texts: List[str]) -> List[List[float]]:
+        result = []
+        for text in texts:
+            # Hash the text to get a deterministic seed
+            h = hashlib.md5(text.encode()).digest()
+            # Expand the 16-byte hash to 384 floats using repetition
+            seed = int.from_bytes(h, "big") % (2**32)
+            rng = np.random.RandomState(seed)
+            vec = rng.randn(dim).astype(np.float32)
+            # Normalize to unit length
+            norm = np.linalg.norm(vec)
+            if norm > 0:
+                vec = vec / norm
+            result.append(vec.tolist())
+        return result
 
-        ## Current Architecture
-
-        <!-- CORBELL_GRAPH_START -->
-        graph context
-        <!-- CORBELL_GRAPH_END -->
-
-        ## Proposed Design
-
-        ### Service Changes
-        Add new endpoint.
-
-        ### Data Flow
-        Data flows from A to B.
-
-        ### Failure Modes and Mitigations
-        Handle timeouts.
-
-        ## Reliability and Risk Constraints
-
-        <!-- CORBELL_CONSTRAINTS_START -->
-        <!-- CORBELL_CONSTRAINTS_END -->
-
-        ## Rollout Plan
-
-        Phase 1: canary.
-    """))
-    return spec_file
-
-
-@pytest.fixture
-def approved_spec(tmp_path) -> Path:
-    """Write an approved spec file."""
-    spec_dir = tmp_path / "specs"
-    spec_dir.mkdir(exist_ok=True)
-    spec_file = spec_dir / "approved-feature.md"
-    spec_file.write_text(textwrap.dedent("""\
-        ---
-        id: approved-feature
-        title: Approved Feature
-        status: approved
-        services:
-          primary: sample-service
-          related: []
-        constraints:
-          manual: []
-          incident_derived: []
-        ---
-
-        ## Context
-        Approved for implementation.
-
-        ## Current Architecture
-        <!-- CORBELL_GRAPH_START -->
-        <!-- CORBELL_GRAPH_END -->
-
-        ## Proposed Design
-        ### Service Changes
-        New worker service.
-        ### Data Flow
-        Worker consumes events.
-        ### Failure Modes and Mitigations
-        Dead-letter queue.
-
-        ## Reliability and Risk Constraints
-        <!-- CORBELL_CONSTRAINTS_START -->
-        <!-- CORBELL_CONSTRAINTS_END -->
-
-        ## Rollout Plan
-        Blue/green deployment.
-    """))
-    return spec_file
+    m = MagicMock()
+    m.encode.side_effect = _encode
+    return m

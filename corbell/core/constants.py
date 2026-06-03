@@ -1,0 +1,52 @@
+"""Shared constants for Corbell — skip dirs and extension/language mapping."""
+
+from __future__ import annotations
+
+# Directories to skip when scanning repos (superset of all per-module lists)
+SKIP_DIRS: frozenset[str] = frozenset({
+    ".git",
+    "__pycache__",
+    "node_modules",
+    "venv",
+    "env",
+    ".venv",
+    "tests",
+    "__tests__",
+    ".pytest_cache",
+    "dist",
+    "build",
+    "coverage",
+    ".tox",
+    ".next",
+    ".nuxt",
+    "target",
+    "bin",
+    "obj",
+    ".svelte-kit",
+    ".cache",
+    "out",
+    ".turbo",
+    ".vercel",
+    "storybook-static",
+    ".storybook",
+    ".corbell",
+})
+
+# File extension → language name mapping (superset of all per-module maps)
+EXTENSION_LANG: dict[str, str] = {
+    ".py": "python",
+    ".js": "javascript",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".jsx": "javascript",
+    ".java": "java",
+    ".go": "go",
+    ".rb": "ruby",
+    ".php": "php",
+    ".cs": "csharp",
+    ".rs": "rust",
+    ".md": "markdown",
+    ".yml": "yaml",
+    ".yaml": "yaml",
+    ".json": "json",
+}

@@ -1,12 +1,9 @@
-"""Tests for core/workspace.py"""
-
-from pathlib import Path
+"""Tests for core/workspace.py — new repos-based schema."""
 
 import pytest
 import yaml
 
 from corbell.core.workspace import (
-    WorkspaceConfig,
     find_workspace_root,
     init_workspace_yaml,
     load_workspace,
@@ -16,9 +13,9 @@ from corbell.core.workspace import (
 def test_load_workspace_basic(sample_workspace_yaml, sample_repo):
     cfg = load_workspace(sample_workspace_yaml)
     assert cfg.workspace.name == "test-platform"
-    assert len(cfg.services) == 1
-    assert cfg.services[0].id == "sample-service"
-    assert cfg.services[0].resolved_path == sample_repo
+    assert len(cfg.repos) == 1
+    assert cfg.repos[0].id == "sample-service"
+    assert cfg.repos[0].resolved_path == sample_repo
 
 
 def test_load_workspace_from_dir(sample_workspace_yaml):
@@ -35,7 +32,7 @@ def test_init_workspace_yaml(tmp_path):
     out = init_workspace_yaml(tmp_path)
     assert out.exists()
     raw = yaml.safe_load(out.read_text())
-    assert "services" in raw
+    assert "repos" in raw
     assert raw["workspace"]["name"] == "my-platform"
 
 
@@ -62,14 +59,14 @@ def test_llm_config_resolved_api_key(tmp_path, monkeypatch):
     config_dir = tmp_path / "corbell"
     config_dir.mkdir()
     ws = config_dir / "workspace.yaml"
-    ws.write_text("""
+    ws.write_text("""\
 version: "1"
 workspace:
   name: test
-services: []
+repos: []
 llm:
   provider: anthropic
-  model: claude-sonnet-4-5-20250929
+  model: claude-sonnet-4-5
 """)
     cfg = load_workspace(ws)
     assert cfg.llm.resolved_api_key() == "sk-test-123"
@@ -108,15 +105,12 @@ def test_detect_language(tmp_path):
     assert _detect_language(unk_dir) == "python"
 
 
-def test_detect_services_monorepo(tmp_path):
-    from corbell.core.workspace import _detect_services
+def test_detect_repos_monorepo(tmp_path):
+    from corbell.core.workspace import _detect_repos
 
     target_dir = tmp_path / "monorepo"
     target_dir.mkdir()
-    
-    # Not a service dir, just node_modules
-    (target_dir / "node_modules").mkdir()
-    
+
     # Service 1
     s1 = target_dir / "service1"
     s1.mkdir()
@@ -127,31 +121,58 @@ def test_detect_services_monorepo(tmp_path):
     s2.mkdir()
     (s2 / "requirements.txt").touch()
 
-    services = _detect_services(target_dir)
-    assert len(services) == 2
-    
-    # Sort them to verify properties predictably
-    services.sort(key=lambda s: s["id"])
-    
-    assert services[0]["id"] == "api"
-    assert services[0]["language"] == "python"
-    assert services[0]["repo"] == "../api"
+    repos = _detect_repos(target_dir)
+    assert len(repos) == 2
 
-    assert services[1]["id"] == "service1"
-    assert services[1]["language"] == "typescript"
-    assert services[1]["repo"] == "../service1"
+    repos.sort(key=lambda r: r["id"])
+
+    assert repos[0]["id"] == "api"
+    assert repos[0]["language"] == "python"
+    assert repos[0]["path"] == "../api"
+
+    assert repos[1]["id"] == "service1"
+    assert repos[1]["language"] == "typescript"
+    assert repos[1]["path"] == "../service1"
 
 
-def test_detect_services_single_repo(tmp_path):
-    from corbell.core.workspace import _detect_services
+def test_detect_repos_single_repo(tmp_path):
+    from corbell.core.workspace import _detect_repos
 
     target_dir = tmp_path / "my-api"
     target_dir.mkdir()
     (target_dir / "go.mod").touch()
     (target_dir / ".git").mkdir()
 
-    services = _detect_services(target_dir)
-    assert len(services) == 1
-    assert services[0]["id"] == "my-api"
-    assert services[0]["language"] == "go"
-    assert services[0]["repo"] == ".."
+    repos = _detect_repos(target_dir)
+    assert len(repos) == 1
+    assert repos[0]["id"] == "my-api"
+    assert repos[0]["language"] == "go"
+    assert repos[0]["path"] == ".."
+
+
+def test_workspace_config_new_fields(tmp_path):
+    """Verify new QueryConfig, IndexingConfig are parsed correctly."""
+    config_dir = tmp_path / "corbell"
+    config_dir.mkdir()
+    ws = config_dir / "workspace.yaml"
+    ws.write_text("""\
+version: "1"
+workspace:
+  name: test
+repos: []
+query:
+  top_k: 20
+  expand_call_depth: 3
+  rerank: false
+indexing:
+  chunk_size: 100
+  chunk_overlap: 20
+  max_file_bytes: 512000
+""")
+    cfg = load_workspace(ws)
+    assert cfg.query.top_k == 20
+    assert cfg.query.expand_call_depth == 3
+    assert cfg.query.rerank is False
+    assert cfg.indexing.chunk_size == 100
+    assert cfg.indexing.chunk_overlap == 20
+    assert cfg.indexing.max_file_bytes == 512000

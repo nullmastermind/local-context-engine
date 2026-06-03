@@ -7,106 +7,47 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field
 
 
-class ServiceConfig(BaseModel):
-    """A single service definition in workspace.yaml."""
+class RepoConfig(BaseModel):
+    """A single repository definition in workspace.yaml."""
 
     id: str
-    repo: str
-    language: str = "python"
-    tags: List[str] = Field(default_factory=list)
+    path: str
+    language: Optional[str] = None
     resolved_path: Optional[Path] = Field(default=None, exclude=True)
 
     model_config = {"extra": "ignore"}
 
 
-class StorageBackendConfig(BaseModel):
-    """Storage backend configuration."""
-
-    backend: str = "sqlite"
-    path: str = ".corbell/workspace.db"
-
-    model_config = {"extra": "ignore"}
-
-
 class StorageConfig(BaseModel):
-    """Storage sub-config."""
+    """Storage sub-config (single SQLite file for both graph and embeddings)."""
 
-    graph: StorageBackendConfig = Field(default_factory=StorageBackendConfig)
-    embeddings: StorageBackendConfig = Field(default_factory=StorageBackendConfig)
+    path: str = ".corbell/workspace.db"
     model: str = "all-MiniLM-L6-v2"
 
     model_config = {"extra": "ignore"}
 
 
-class ExistingDocsConfig(BaseModel):
-    """Configuration for existing design doc scanning."""
+class QueryConfig(BaseModel):
+    """Query pipeline configuration."""
 
-    auto_scan: bool = True
-    paths: List[str] = Field(default_factory=list)
-    patterns: List[str] = Field(
-        default_factory=lambda: [
-            "*.design.md",
-            "*-spec.md",
-            "RFC-*.md",
-            "ADR-*.md",
-            "DESIGN.md",
-            "*-design.md",
-            "*_design.md",
-        ]
-    )
+    top_k: int = 50
+    expand_call_depth: int = 2
+    expand_max_chunks: int = 30
+    rerank: bool = True
 
     model_config = {"extra": "ignore"}
 
 
-class SpecConfig(BaseModel):
-    """Spec output configuration."""
+class IndexingConfig(BaseModel):
+    """Indexing pipeline configuration."""
 
-    output_dir: str = "specs/"
-    template: str = "default"
-
-    model_config = {"extra": "ignore"}
-
-
-class NotionIntegration(BaseModel):
-    """Notion integration config."""
-
-    token: Optional[str] = None
-    parent_page_id: Optional[str] = None
-
-    model_config = {"extra": "ignore"}
-
-
-class LinearIntegration(BaseModel):
-    """Linear integration config."""
-
-    api_key: Optional[str] = None
-    team_id: Optional[str] = None
-    default_project_id: Optional[str] = None
-
-    model_config = {"extra": "ignore"}
-
-
-class JiraIntegration(BaseModel):
-    """Jira integration config."""
-
-    url: Optional[str] = None
-    email: Optional[str] = None
-    api_token: Optional[str] = None
-    project_key: Optional[str] = None
-    issue_type: str = "Task"
-
-    model_config = {"extra": "ignore"}
-
-
-class IntegrationsConfig(BaseModel):
-    """External integrations."""
-
-    notion: NotionIntegration = Field(default_factory=NotionIntegration)
-    linear: LinearIntegration = Field(default_factory=LinearIntegration)
-    jira: JiraIntegration = Field(default_factory=JiraIntegration)
+    skip_dirs: List[str] = Field(default_factory=list)
+    max_file_bytes: int = 1024 * 1024  # 1 MB
+    chunk_size: int = 50
+    chunk_overlap: int = 10
 
     model_config = {"extra": "ignore"}
 
@@ -122,10 +63,8 @@ class LLMConfig(BaseModel):
     """
 
     provider: str = "anthropic"
-    model: str = "claude-sonnet-4-5-20250929"
+    model: str = "claude-sonnet-4-5"
     api_key: Optional[str] = None
-
-    context_budget: int = 100_000
 
     # AWS Bedrock
     aws_region: Optional[str] = None
@@ -179,11 +118,10 @@ class WorkspaceConfig(BaseModel):
 
     version: str = "1"
     workspace: WorkspaceInfo = Field(default_factory=WorkspaceInfo)
-    services: List[ServiceConfig] = Field(default_factory=list)
-    existing_docs: ExistingDocsConfig = Field(default_factory=ExistingDocsConfig)
+    repos: List[RepoConfig] = Field(default_factory=list)
     storage: StorageConfig = Field(default_factory=StorageConfig)
-    spec: SpecConfig = Field(default_factory=SpecConfig)
-    integrations: IntegrationsConfig = Field(default_factory=IntegrationsConfig)
+    query: QueryConfig = Field(default_factory=QueryConfig)
+    indexing: IndexingConfig = Field(default_factory=IndexingConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
 
     # Internal: path this config was loaded from
@@ -193,32 +131,24 @@ class WorkspaceConfig(BaseModel):
 
     def resolve_paths(self, config_dir: Path) -> "WorkspaceConfig":
         """Resolve relative repo paths to absolute paths under config_dir."""
-        for svc in self.services:
-            raw = svc.repo
+        for repo in self.repos:
+            raw = repo.path
             if raw.startswith("${"):
                 var = raw[2:-1]
                 raw = os.environ.get(var, raw)
             p = Path(raw)
             if not p.is_absolute():
                 p = (config_dir / p).resolve()
-            svc.resolved_path = p
+            repo.resolved_path = p
         return self
 
     def db_path(self, config_dir: Path) -> Path:
         """Return absolute path to the SQLite DB file."""
-        raw = self.storage.graph.path
+        raw = self.storage.path
         p = Path(raw)
         if not p.is_absolute():
             p = (config_dir / p).resolve()
         p.parent.mkdir(parents=True, exist_ok=True)
-        return p
-
-    def spec_output_dir(self, config_dir: Path) -> Path:
-        """Return absolute path to the spec output directory."""
-        p = Path(self.spec.output_dir)
-        if not p.is_absolute():
-            p = (config_dir / p).resolve()
-        p.mkdir(parents=True, exist_ok=True)
         return p
 
 
@@ -279,23 +209,22 @@ def load_workspace(path: Path | str) -> "WorkspaceConfig":
 
 
 def find_workspace_root(start: Path | str | None = None) -> Optional[Path]:
-    """Walk up directories looking for corbell-data/workspace.yaml.
+    """Walk up directories looking for workspace.yaml.
 
     Args:
         start: Directory to start searching from (default: cwd).
 
     Returns:
-        Path to the **directory** containing ``corbell-data/workspace.yaml``, or
+        Path to the **directory** containing ``workspace.yaml`` (or
+        ``corbell/workspace.yaml`` or ``corbell-data/workspace.yaml``), or
         ``None`` if not found.
     """
     current = Path(start or Path.cwd()).resolve()
     for candidate in [current, *current.parents]:
-        ws = candidate / "corbell-data" / "workspace.yaml"
-        if ws.exists():
-            return candidate
-        ws2 = candidate / "workspace.yaml"
-        if ws2.exists():
-            return candidate
+        for sub in ("corbell", "corbell-data", ""):
+            ws = candidate / sub / "workspace.yaml" if sub else candidate / "workspace.yaml"
+            if ws.exists():
+                return ws.parent
     return None
 
 
@@ -303,7 +232,12 @@ def _detect_language(path: Path) -> str:
     """Detect the most likely language of a project directory based on key files."""
     if (path / "package.json").exists() or (path / "tsconfig.json").exists():
         return "typescript"
-    if (path / "requirements.txt").exists() or (path / "pyproject.toml").exists() or (path / "Pipfile").exists() or (path / "setup.py").exists():
+    if (
+        (path / "requirements.txt").exists()
+        or (path / "pyproject.toml").exists()
+        or (path / "Pipfile").exists()
+        or (path / "setup.py").exists()
+    ):
         return "python"
     if (path / "go.mod").exists():
         return "go"
@@ -314,60 +248,67 @@ def _detect_language(path: Path) -> str:
     return "python"
 
 
-def _detect_services(target_dir: Path) -> List[Dict[str, Any]]:
-    """Detect services in the target directory (single repo or monorepo subdirectories)."""
-    services = []
-    
-    def is_service_dir(d: Path) -> bool:
-        indicators = [".git", "package.json", "requirements.txt", "pyproject.toml", "go.mod", "pom.xml", "Cargo.toml"]
+def _detect_repos(target_dir: Path) -> List[Dict[str, Any]]:
+    """Detect repos in the target directory (single repo or monorepo subdirectories)."""
+    repos = []
+
+    def is_repo_dir(d: Path) -> bool:
+        indicators = [
+            ".git", "package.json", "requirements.txt", "pyproject.toml",
+            "go.mod", "pom.xml", "Cargo.toml",
+        ]
         return any((d / i).exists() for i in indicators)
 
-    if is_service_dir(target_dir):
-        sub_services = []
+    if is_repo_dir(target_dir):
+        sub_repos = []
         for child in target_dir.iterdir():
-            if child.is_dir() and not child.name.startswith(".") and child.name not in ("node_modules", "venv", ".venv", "dist", "build"):
-                if is_service_dir(child):
-                    sub_services.append(child)
-        
-        if len(sub_services) > 0:
-            for child in sub_services:
-                services.append({
+            if (
+                child.is_dir()
+                and not child.name.startswith(".")
+                and child.name not in ("node_modules", "venv", ".venv", "dist", "build")
+            ):
+                if is_repo_dir(child):
+                    sub_repos.append(child)
+
+        if len(sub_repos) > 0:
+            for child in sub_repos:
+                repos.append({
                     "id": child.name,
-                    "repo": f"../{child.name}",
+                    "path": f"../{child.name}",
                     "language": _detect_language(child),
-                    "tags": ["core"]
                 })
         else:
-            services.append({
+            repos.append({
                 "id": target_dir.name,
-                "repo": "..",
+                "path": "..",
                 "language": _detect_language(target_dir),
-                "tags": ["core"]
             })
     else:
         for child in target_dir.iterdir():
-            if child.is_dir() and not child.name.startswith(".") and child.name not in ("node_modules", "venv", ".venv", "dist", "build"):
-                if is_service_dir(child):
-                    services.append({
+            if (
+                child.is_dir()
+                and not child.name.startswith(".")
+                and child.name not in ("node_modules", "venv", ".venv", "dist", "build")
+            ):
+                if is_repo_dir(child):
+                    repos.append({
                         "id": child.name,
-                        "repo": f"../{child.name}",
+                        "path": f"../{child.name}",
                         "language": _detect_language(child),
-                        "tags": ["core"]
                     })
-    
-    if not services:
-        services.append({
-            "id": "my-service",
-            "repo": "../my-service",
+
+    if not repos:
+        repos.append({
+            "id": "my-repo",
+            "path": "../my-repo",
             "language": "python",
-            "tags": ["core"]
         })
-        
-    return services
+
+    return repos
 
 
 def init_workspace_yaml(target_dir: Path) -> Path:
-    """Write a starter workspace.yaml into target_dir/corbell-data/workspace.yaml.
+    """Write a starter workspace.yaml into target_dir/corbell/workspace.yaml.
 
     Args:
         target_dir: Root directory for the new workspace.
@@ -375,16 +316,16 @@ def init_workspace_yaml(target_dir: Path) -> Path:
     Returns:
         Path to the written file.
     """
-    out_dir = target_dir / "corbell-data"
+    out_dir = target_dir / "corbell"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / "workspace.yaml"
-    services_detected = _detect_services(target_dir)
-    services_yaml = ""
-    for svc in services_detected:
-        services_yaml += f"  - id: {svc['id']}\n"
-        services_yaml += f"    repo: {svc['repo']}\n"
-        services_yaml += f"    language: {svc['language']}\n"
-        services_yaml += f"    tags: [{', '.join(svc['tags'])}]\n"
+    repos_detected = _detect_repos(target_dir)
+    repos_yaml = ""
+    for repo in repos_detected:
+        repos_yaml += f"  - id: {repo['id']}\n"
+        repos_yaml += f"    path: {repo['path']}\n"
+        if repo.get("language"):
+            repos_yaml += f"    language: {repo['language']}\n"
 
     template = """\
 version: "1"
@@ -393,91 +334,35 @@ workspace:
   name: "my-platform"
   root: ".."
 
-services:
-{services_block}
-existing_docs:
-  auto_scan: true
-  paths: []
-  patterns:
-    - "*.design.md"
-    - "*-spec.md"
-    - "RFC-*.md"
-    - "ADR-*.md"
-    - "DESIGN.md"
+repos:
+{repos_block}
 
 storage:
-  graph:
-    backend: sqlite
-    path: .corbell/workspace.db
-  embeddings:
-    backend: sqlite
-    path: .corbell/workspace.db
+  path: .corbell/workspace.db
   model: all-MiniLM-L6-v2
 
-spec:
-  output_dir: specs/
-  template: default
+query:
+  top_k: 50
+  expand_call_depth: 2
+  expand_max_chunks: 30
+  rerank: true
 
-integrations:
-  notion:
-    token: ${CORBELL_NOTION_TOKEN}
-    parent_page_id: ${CORBELL_NOTION_PAGE_ID}
-  linear:
-    api_key: ${CORBELL_LINEAR_API_KEY}
-    team_id: ${CORBELL_LINEAR_TEAM_ID}
-    default_project_id: ${CORBELL_LINEAR_PROJECT_ID}
-  jira:
-    url: ${CORBELL_JIRA_URL}
-    email: ${CORBELL_JIRA_EMAIL}
-    api_token: ${CORBELL_JIRA_API_TOKEN}
-    project_key: ${CORBELL_JIRA_PROJECT_KEY}
-    issue_type: Task
+indexing:
+  skip_dirs: []
+  max_file_bytes: 1048576
+  chunk_size: 50
+  chunk_overlap: 10
 
 llm:
   # ---- Option 1: Anthropic (recommended) ----
   provider: anthropic
   model: claude-sonnet-4-5
-  api_key: ${ANTHROPIC_API_KEY}
-  context_budget: 100000
+  api_key: ${{ANTHROPIC_API_KEY}}
 
   # ---- Option 2: OpenAI ----
   # provider: openai
   # model: gpt-4o
-  # api_key: ${OPENAI_API_KEY}
-
-  # ---- Option 3: AWS Bedrock (Anthropic Claude) ----
-  # Two auth options:
-  #
-  # A) Long-term API key (simplest — paste your Bedrock API key directly):
-  # provider: aws
-  # model: us.anthropic.claude-sonnet-4-20250514-v1:0
-  # api_key: ${BEDROCK_API_KEY}    # get this from AWS Bedrock console
-  # aws_region: us-east-1
-  #
-  # B) IAM credentials (boto3 credential chain):
-  # provider: aws
-  # model: us.anthropic.claude-sonnet-4-20250514-v1:0
-  # aws_region: us-east-1
-  # (set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY or use: aws configure)
-
-  # ---- Option 4: Azure OpenAI ----
-  # provider: azure
-  # model: gpt-4o
-  # api_key: ${AZURE_OPENAI_API_KEY}
-  # azure_endpoint: https://my-resource.openai.azure.com/
-  # azure_deployment: my-gpt4o-deployment
-  # azure_api_version: "2024-02-01"
-
-  # ---- Option 5: GCP Vertex AI (Anthropic Claude) ----
-  # Auth: gcloud auth application-default login
-  # provider: gcp
-  # model: claude-sonnet-4-5@20250514
-  # gcp_project: my-gcp-project
-  # gcp_region: us-central1
-
-  # ---- Option 6: Ollama (local, no API key) ----
-  # provider: ollama
-  # model: llama3
+  # api_key: ${{OPENAI_API_KEY}}
 """
-    out.write_text(template.replace("{services_block}", services_yaml), encoding="utf-8")
+    out.write_text(template.replace("{repos_block}", repos_yaml), encoding="utf-8")
     return out

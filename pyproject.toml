@@ -4,20 +4,20 @@ build-backend = "hatchling.build"
 
 [project]
 name = "corbell"
-version = "1.0.0"
-description = "Multi-repo architecture graph, spec generation, and architecture review for backend teams."
+version = "2.0.0"
+description = "Code retrieval engine — hybrid embedding + graph search for LLM context injection."
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.11"
 authors = [
   {name = "Corbell Contributors"}
 ]
-keywords = ["architecture", "spec", "design-docs", "multi-repo", "embeddings", "LLM"]
+keywords = ["code-search", "embeddings", "retrieval", "LLM", "context", "MCP"]
 classifiers = [
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "License :: OSI Approved :: Apache Software License",
-  "Topic :: Software Development :: Documentation",
+  "Topic :: Software Development :: Libraries",
   "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
@@ -25,28 +25,21 @@ dependencies = [
   "typer>=0.12",
   "pydantic>=2.0",
   "pyyaml>=6.0",
-  "gitpython>=3.1",
   "sentence-transformers>=3.0",
   "transformers<5.0.0",
   "numpy>=1.26,<2.0",
   "rich>=13.0",
-  "questionary>=2.0",
 ]
 
 [project.optional-dependencies]
-neo4j    = ["neo4j>=5.0"]
-chroma   = ["chromadb>=0.5"]
 openai   = ["openai>=1.0"]
 anthropic = ["anthropic>=0.25"]
-# Cloud providers — use your existing cloud credentials / long-term API keys
+# Cloud providers
 aws      = ["boto3>=1.34"]
-azure    = ["openai>=1.0"]  # Azure OpenAI uses the openai SDK with AzureOpenAI client
+azure    = ["openai>=1.0"]  # Azure OpenAI uses the openai SDK
 gcp      = ["google-cloud-aiplatform>=1.38", "anthropic[vertex]>=0.25"]
 mcp      = ["mcp>=1.1.2"]
-notion   = ["notion-client>=2.0"]
-linear   = ["requests>=2.31"]
 # Tree-sitter grammars for accurate multi-language method extraction
-# Install with: pip install "corbell[treesitter]"
 treesitter = [
   "tree-sitter>=0.21",
   "tree-sitter-python>=0.21",
@@ -70,7 +63,7 @@ dev      = [
 ]
 
 [project.scripts]
-corbell = "corbell.cli.main:app"
+corbell = "corbell.cli.main:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["corbell"]
@@ -78,6 +71,9 @@ packages = ["corbell"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+ignore = ["E501", "E741"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

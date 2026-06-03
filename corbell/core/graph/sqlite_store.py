@@ -455,3 +455,46 @@ class SQLiteGraphStore(GraphStore):
             conn.execute("DELETE FROM graph_nodes")
             conn.execute("DELETE FROM graph_edges")
             conn.commit()
+
+    def delete_service_data(self, service_id: str) -> None:
+        """Delete a service node, all its method nodes, and all related edges.
+
+        Removes the service node itself, all MethodNodes whose ``service_id``
+        matches, and all edges where ``source_id`` starts with ``service_id``.
+        This leaves data for other services intact.
+
+        Args:
+            service_id: The ID of the service to remove.
+        """
+        with self._conn() as conn:
+            # Delete the service node itself
+            conn.execute(
+                "DELETE FROM graph_nodes WHERE id = ? AND node_type = 'service'",
+                (service_id,),
+            )
+
+            # Find and delete all method nodes for this service (stored in JSON data)
+            method_rows = conn.execute(
+                "SELECT id, data FROM graph_nodes WHERE node_type = 'method'"
+            ).fetchall()
+            method_ids_to_delete = []
+            for row in method_rows:
+                import json as _json
+                data = _json.loads(row["data"])
+                if data.get("service_id") == service_id:
+                    method_ids_to_delete.append(row["id"])
+
+            if method_ids_to_delete:
+                placeholders = ",".join("?" * len(method_ids_to_delete))
+                conn.execute(
+                    f"DELETE FROM graph_nodes WHERE id IN ({placeholders})",
+                    method_ids_to_delete,
+                )
+
+            # Delete all edges where source starts with service_id
+            conn.execute(
+                "DELETE FROM graph_edges WHERE source_id = ? OR source_id LIKE ?",
+                (service_id, f"{service_id}::%"),
+            )
+
+            conn.commit()

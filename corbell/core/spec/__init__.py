@@ -1,1 +1,0 @@
-"""Corbell spec module."""

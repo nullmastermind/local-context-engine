@@ -1,9 +1,5 @@
 """Tests for code chunk extractor and embedding store."""
 
-import textwrap
-from pathlib import Path
-from unittest.mock import patch
-
 import pytest
 
 from corbell.core.embeddings.extractor import CodeChunkExtractor, EmbeddingRecord
@@ -80,7 +76,6 @@ def test_upsert_batch(emb_store):
 
 
 def test_query_returns_results(emb_store):
-    import numpy as np
     records = [_make_record(i) for i in range(5)]
     emb_store.upsert_batch(records)
 
@@ -116,3 +111,67 @@ def test_clear_service(emb_store):
     emb_store.clear(service_id="svc-a")
     assert emb_store.count() == 3
     assert emb_store.count("svc-b") == 3
+
+
+# ─── New method tests (Task 8.10) ──────────────────────────────────────────
+
+def test_delete_by_file(emb_store):
+    """delete_by_file removes only chunks for the specified file and repo."""
+    for i in range(3):
+        emb_store.upsert(_make_record(i))  # all use f{i}.py
+    # f0.py, f1.py, f2.py — delete f1.py
+    deleted = emb_store.delete_by_file("f1.py", "svc")
+    assert deleted == 1
+    assert emb_store.count() == 2
+
+
+def test_delete_by_file_wrong_repo(emb_store):
+    """delete_by_file with wrong repo_id deletes nothing."""
+    emb_store.upsert(_make_record(0))
+    deleted = emb_store.delete_by_file("f0.py", "other-svc")
+    assert deleted == 0
+    assert emb_store.count() == 1
+
+
+def test_get_all_vectors(emb_store):
+    """get_all_vectors returns (id, blob) tuples for all records with embeddings."""
+    records = [_make_record(i) for i in range(5)]
+    emb_store.upsert_batch(records)
+
+    all_vecs = emb_store.get_all_vectors()
+    assert len(all_vecs) == 5
+    for chunk_id, blob in all_vecs:
+        assert isinstance(chunk_id, str)
+        assert isinstance(blob, bytes)
+        assert len(blob) > 0
+
+
+def test_get_all_vectors_empty(emb_store):
+    """get_all_vectors returns empty list when no embeddings stored."""
+    result = emb_store.get_all_vectors()
+    assert result == []
+
+
+def test_get_chunks_by_ids(emb_store):
+    """get_chunks_by_ids fetches the correct records."""
+    records = [_make_record(i) for i in range(5)]
+    emb_store.upsert_batch(records)
+
+    ids_to_fetch = [records[1].id, records[3].id]
+    fetched = emb_store.get_chunks_by_ids(ids_to_fetch)
+    assert len(fetched) == 2
+    fetched_ids = {r.id for r in fetched}
+    assert fetched_ids == set(ids_to_fetch)
+
+
+def test_get_chunks_by_ids_empty(emb_store):
+    """get_chunks_by_ids returns empty list for empty input."""
+    result = emb_store.get_chunks_by_ids([])
+    assert result == []
+
+
+def test_get_chunks_by_ids_missing(emb_store):
+    """get_chunks_by_ids returns only existing records."""
+    emb_store.upsert(_make_record(0))
+    result = emb_store.get_chunks_by_ids(["nonexistent::id"])
+    assert result == []

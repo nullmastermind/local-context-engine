@@ -6,9 +6,7 @@ Implements :class:`~corbell.core.embeddings.base.EmbeddingStore`.
 
 from __future__ import annotations
 
-import json
 import sqlite3
-import struct
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -187,6 +185,58 @@ class SQLiteEmbeddingStore(EmbeddingStore):
             else:
                 conn.execute("DELETE FROM embedding_chunks")
             conn.commit()
+
+    def delete_by_file(self, file_path: str, repo_id: str) -> int:
+        """Delete all chunks for a specific file in a repo.
+
+        Args:
+            file_path: Relative file path within the repo.
+            repo_id: The service/repo ID.
+
+        Returns:
+            Number of rows deleted.
+        """
+        with self._conn() as conn:
+            cursor = conn.execute(
+                "DELETE FROM embedding_chunks WHERE file_path = ? AND service_id = ?",
+                (file_path, repo_id),
+            )
+            conn.commit()
+            return cursor.rowcount
+
+    def get_all_vectors(self) -> List[Tuple[str, bytes]]:
+        """Return all chunk IDs and their raw embedding blobs.
+
+        Used by :class:`~corbell.core.embeddings.search_cache.EmbeddingSearchCache`
+        to load all vectors into memory at once.
+
+        Returns:
+            List of ``(chunk_id, raw_blob)`` tuples for rows that have an embedding.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT id, embedding FROM embedding_chunks WHERE embedding IS NOT NULL"
+            ).fetchall()
+        return [(row["id"], row["embedding"]) for row in rows]
+
+    def get_chunks_by_ids(self, chunk_ids: List[str]) -> List[EmbeddingRecord]:
+        """Fetch full EmbeddingRecord objects for the given IDs.
+
+        Args:
+            chunk_ids: List of chunk IDs to retrieve.
+
+        Returns:
+            List of :class:`EmbeddingRecord` objects (order not guaranteed).
+        """
+        if not chunk_ids:
+            return []
+        with self._conn() as conn:
+            placeholders = ",".join("?" * len(chunk_ids))
+            rows = conn.execute(
+                f"SELECT * FROM embedding_chunks WHERE id IN ({placeholders})",
+                chunk_ids,
+            ).fetchall()
+        return [self._row_to_record(row) for row in rows]
 
     # ------------------------------------------------------------------ #
     # Serialization helpers                                                #
