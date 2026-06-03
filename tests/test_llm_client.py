@@ -171,3 +171,161 @@ def test_google_fallback_on_no_credentials(monkeypatch):
     assert len(result) > 0
     # Fallback string mentions Google AI
     assert "Google AI" in result
+
+
+# ---------------------------------------------------------------------------
+# Multi-key: parse, round-robin, failover, all-fail, non-key 400
+# ---------------------------------------------------------------------------
+
+def test_google_multikey_parses_csv():
+    """Constructor parses comma-separated api_key into _google_keys."""
+    client = LLMClient(provider="google", api_key="key1, key2 , key3")
+    assert client._google_keys == ["key1", "key2", "key3"]
+
+
+def test_google_multikey_is_configured_true():
+    """is_configured uses _google_keys, not _api_key."""
+    client = LLMClient(provider="google", api_key="k1,k2")
+    assert client.is_configured is True
+
+
+def test_google_multikey_is_configured_false(monkeypatch):
+    """is_configured False when no keys parsed."""
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("CORBELL_LLM_API_KEY", raising=False)
+    client = LLMClient(provider="google")
+    assert client.is_configured is False
+    assert client._google_keys == []
+
+
+def test_google_multikey_roundrobin():
+    """_google_key_index advances after each successful call."""
+    genai_mod, types_mod, response = _make_genai_mock()
+
+    google_pkg = ModuleType("google")
+    google_pkg.genai = genai_mod
+    genai_pkg = ModuleType("google.genai")
+    genai_pkg.types = types_mod
+
+    with patch.dict(sys.modules, {
+        "google": google_pkg, "google.genai": genai_pkg, "google.genai.types": types_mod,
+    }):
+        client = LLMClient(provider="google", api_key="k0,k1,k2")
+        assert client._google_key_index == 0
+        client._call_google_ai("sys", "usr", 100, 0.1)
+        assert client._google_key_index == 1
+        client._call_google_ai("sys", "usr", 100, 0.1)
+        assert client._google_key_index == 2
+        client._call_google_ai("sys", "usr", 100, 0.1)
+        assert client._google_key_index == 0  # wraps
+
+
+def test_google_multikey_failover():
+    """key[0] fails with 401, key[1] succeeds; index ends at 2 (next after key[1])."""
+    key_err = Exception("bad key")
+    key_err.code = 401
+    key_err.message = "UNAUTHENTICATED"
+
+    call_count = {"n": 0}
+
+    good_response = MagicMock()
+    good_response.text = "ok"
+    good_response.usage_metadata = None
+
+    def fake_generate(**kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise key_err
+        return good_response
+
+    models_mock = MagicMock()
+    models_mock.generate_content.side_effect = fake_generate
+
+    client_instance = MagicMock()
+    client_instance.models = models_mock
+
+    genai_mod = MagicMock()
+    genai_mod.Client.return_value = client_instance
+
+    types_mod = MagicMock()
+    types_mod.GenerateContentConfig = MagicMock(return_value=MagicMock())
+
+    google_pkg = ModuleType("google")
+    google_pkg.genai = genai_mod
+    genai_pkg = ModuleType("google.genai")
+    genai_pkg.types = types_mod
+
+    with patch.dict(sys.modules, {
+        "google": google_pkg, "google.genai": genai_pkg, "google.genai.types": types_mod,
+    }):
+        client = LLMClient(provider="google", api_key="bad-key,good-key")
+        result = client._call_google_ai("sys", "usr", 100, 0.1)
+
+    assert result == "ok"
+    assert client._google_key_index == 0  # key[1] succeeded → next is key[0] (wraps)
+
+
+def test_google_multikey_all_fail():
+    """RuntimeError raised when all keys produce key errors."""
+    key_err = Exception("quota exceeded")
+    key_err.code = 429
+    key_err.message = "RESOURCE_EXHAUSTED"
+
+    models_mock = MagicMock()
+    models_mock.generate_content.side_effect = key_err
+
+    client_instance = MagicMock()
+    client_instance.models = models_mock
+
+    genai_mod = MagicMock()
+    genai_mod.Client.return_value = client_instance
+
+    types_mod = MagicMock()
+    types_mod.GenerateContentConfig = MagicMock(return_value=MagicMock())
+
+    google_pkg = ModuleType("google")
+    google_pkg.genai = genai_mod
+    genai_pkg = ModuleType("google.genai")
+    genai_pkg.types = types_mod
+
+    with patch.dict(sys.modules, {
+        "google": google_pkg, "google.genai": genai_pkg, "google.genai.types": types_mod,
+    }):
+        client = LLMClient(provider="google", api_key="k1,k2")
+        with pytest.raises(RuntimeError, match="All 2 Google API key"):
+            client._call_google_ai("sys", "usr", 100, 0.1)
+
+    assert client._google_key_index == 0  # unchanged from start
+
+
+def test_google_nonkey_400_propagates():
+    """400 without 'api key' in message re-raises immediately without rotating."""
+    bad_req = Exception("invalid content")
+    bad_req.code = 400
+    bad_req.message = "INVALID_ARGUMENT: bad contents"
+
+    models_mock = MagicMock()
+    models_mock.generate_content.side_effect = bad_req
+
+    client_instance = MagicMock()
+    client_instance.models = models_mock
+
+    genai_mod = MagicMock()
+    genai_mod.Client.return_value = client_instance
+
+    types_mod = MagicMock()
+    types_mod.GenerateContentConfig = MagicMock(return_value=MagicMock())
+
+    google_pkg = ModuleType("google")
+    google_pkg.genai = genai_mod
+    genai_pkg = ModuleType("google.genai")
+    genai_pkg.types = types_mod
+
+    with patch.dict(sys.modules, {
+        "google": google_pkg, "google.genai": genai_pkg, "google.genai.types": types_mod,
+    }):
+        client = LLMClient(provider="google", api_key="k1,k2")
+        with pytest.raises(Exception, match="invalid content"):
+            client._call_google_ai("sys", "usr", 100, 0.1)
+
+    assert models_mock.generate_content.call_count == 1

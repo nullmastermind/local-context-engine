@@ -115,6 +115,15 @@ class LLMClient:
         self._api_key = api_key or self._resolve_key()
         self.token_tracker = token_tracker
 
+        # Google multi-key support — parsed eagerly so is_configured is accurate
+        if self.provider == "google":
+            raw = self._api_key or ""
+            self._google_keys: list[str] = [k.strip() for k in raw.split(",") if k.strip()]
+            self._google_key_index: int = 0
+        else:
+            self._google_keys = []
+            self._google_key_index = 0
+
         # Cloud config
         self.aws_region = aws_region or os.getenv("AWS_REGION", "us-east-1")
         self.azure_endpoint = azure_endpoint or os.getenv("AZURE_OPENAI_ENDPOINT", "")
@@ -206,6 +215,8 @@ class LLMClient:
                 or os.getenv("GOOGLE_CLOUD_PROJECT")
                 or self.gcp_project
             )
+        if self.provider == "google":
+            return bool(self._google_keys)
         return bool(self._api_key)
 
     @property
@@ -306,14 +317,10 @@ class LLMClient:
     ) -> str:
         """Call Google AI (Gemini) models via the google-genai SDK.
 
+        Rotates across all configured keys on auth/quota failures.
+        Raises RuntimeError only when all keys are exhausted.
+
         Requires ``pip install corbell[google]`` and ``GOOGLE_API_KEY``.
-
-        .. code-block:: yaml
-
-            llm:
-              provider: google
-              model: gemini-2.5-flash
-              api_key: ${GOOGLE_API_KEY}
         """
         try:
             from google import genai
@@ -321,25 +328,40 @@ class LLMClient:
         except ImportError:
             raise ImportError("pip install corbell[google]")
 
-        client = genai.Client(api_key=self._api_key)
-        response = client.models.generate_content(
-            model=self.model,
-            contents=user,
-            config=types.GenerateContentConfig(
-                system_instruction=system,
-                max_output_tokens=max_tokens,
-                temperature=temperature,
-            ),
+        start = self._google_key_index
+        errors: list[str] = []
+        for i in range(len(self._google_keys)):
+            idx = (start + i) % len(self._google_keys)
+            key = self._google_keys[idx]
+            try:
+                client = genai.Client(api_key=key)
+                response = client.models.generate_content(
+                    model=self.model,
+                    contents=user,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system,
+                        max_output_tokens=max_tokens,
+                        temperature=temperature,
+                    ),
+                )
+                self._google_key_index = (idx + 1) % len(self._google_keys)
+                if self.token_tracker and response.usage_metadata:
+                    self.token_tracker.record(
+                        request_type, self.model,
+                        response.usage_metadata.prompt_token_count or 0,
+                        response.usage_metadata.candidates_token_count or 0,
+                    )
+                return response.text
+            except Exception as e:
+                if self._is_google_key_error(e):
+                    errors.append(f"key[{idx}]: {e}")
+                    continue
+                raise
+
+        raise RuntimeError(
+            f"All {len(self._google_keys)} Google API key(s) failed:\n"
+            + "\n".join(errors)
         )
-
-        if self.token_tracker and response.usage_metadata:
-            self.token_tracker.record(
-                request_type, self.model,
-                response.usage_metadata.prompt_token_count or 0,
-                response.usage_metadata.candidates_token_count or 0,
-            )
-
-        return response.text
 
     # ------------------------------------------------------------------ #
     # Provider implementations — cloud                                     #
@@ -542,6 +564,17 @@ class LLMClient:
     # ------------------------------------------------------------------ #
     # Helpers                                                              #
     # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _is_google_key_error(e: Exception) -> bool:
+        """Return True when a Google ClientError is caused by the key, not the request."""
+        code = getattr(e, "code", None)
+        if code in (401, 403, 429):
+            return True
+        if code == 400:
+            msg = (getattr(e, "message", None) or str(e)).lower()
+            return "api key" in msg
+        return False
 
     def _resolve_key(self) -> Optional[str]:
         env_map = {

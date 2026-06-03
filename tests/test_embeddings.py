@@ -291,3 +291,192 @@ def test_google_embedding_model_import_error():
     with patch.dict(sys.modules, {"google": None, "google.genai": None}):
         with pytest.raises(ImportError, match="pip install corbell\\[google\\]"):
             model.encode(["text"])
+
+
+# ─── GoogleEmbeddingModel multi-key tests ────────────────────────────────────
+
+def _make_google_mocks_for_keys(num_texts: int = 1):
+    """Return (genai_mod, types_mod) with a fresh models mock per Client() call."""
+    embeddings = []
+    for i in range(num_texts):
+        emb = MagicMock()
+        emb.values = [float(i) * 0.1] * 768
+        embeddings.append(emb)
+    result_mock = MagicMock()
+    result_mock.embeddings = embeddings
+
+    models_mock = MagicMock()
+    models_mock.embed_content.return_value = result_mock
+
+    client_instance = MagicMock()
+    client_instance.models = models_mock
+
+    genai_mod = MagicMock()
+    genai_mod.Client.return_value = client_instance
+
+    types_mod = MagicMock()
+    types_mod.EmbedContentConfig = MagicMock(return_value=MagicMock())
+
+    return genai_mod, types_mod, models_mock, client_instance
+
+
+def test_google_embedding_multikey_parses_csv(monkeypatch):
+    """Constructor parses comma-separated keys into _api_keys list."""
+    from corbell.core.embeddings.model import GoogleEmbeddingModel
+
+    model = GoogleEmbeddingModel(api_key="key1, key2 , key3")
+    assert model._api_keys == ["key1", "key2", "key3"]
+
+
+def test_google_embedding_multikey_parses_env(monkeypatch):
+    """Constructor parses CSV from GOOGLE_API_KEY env var."""
+    from corbell.core.embeddings.model import GoogleEmbeddingModel
+
+    monkeypatch.setenv("GOOGLE_API_KEY", "envkey1,envkey2")
+    model = GoogleEmbeddingModel()
+    assert model._api_keys == ["envkey1", "envkey2"]
+
+
+def test_google_embedding_multikey_roundrobin():
+    """_key_index advances after a successful encode call."""
+    from corbell.core.embeddings.model import GoogleEmbeddingModel
+
+    genai_mod, types_mod, models_mock, _ = _make_google_mocks_for_keys()
+
+    google_pkg = ModuleType("google")
+    google_pkg.genai = genai_mod
+    genai_pkg = ModuleType("google.genai")
+    genai_pkg.types = types_mod
+
+    with patch.dict(sys.modules, {
+        "google": google_pkg, "google.genai": genai_pkg, "google.genai.types": types_mod,
+    }):
+        model = GoogleEmbeddingModel(api_key="key0,key1,key2")
+        assert model._key_index == 0
+        model.encode(["text"])
+        assert model._key_index == 1
+        model.encode(["text"])
+        assert model._key_index == 2
+        model.encode(["text"])
+        assert model._key_index == 0  # wraps
+
+
+def test_google_embedding_multikey_failover():
+    """On key error for key[0], retries with key[1] and succeeds."""
+    from corbell.core.embeddings.model import GoogleEmbeddingModel
+
+    emb = MagicMock()
+    emb.values = [0.1] * 768
+    result_mock = MagicMock()
+    result_mock.embeddings = [emb]
+
+    # key error for code 401
+    key_err = Exception("bad key")
+    key_err.code = 401
+    key_err.message = "UNAUTHENTICATED"
+
+    call_count = {"n": 0}
+
+    def fake_embed_content(**kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise key_err
+        return result_mock
+
+    models_mock = MagicMock()
+    models_mock.embed_content.side_effect = fake_embed_content
+
+    client_instance = MagicMock()
+    client_instance.models = models_mock
+
+    genai_mod = MagicMock()
+    genai_mod.Client.return_value = client_instance
+
+    types_mod = MagicMock()
+    types_mod.EmbedContentConfig = MagicMock(return_value=MagicMock())
+
+    google_pkg = ModuleType("google")
+    google_pkg.genai = genai_mod
+    genai_pkg = ModuleType("google.genai")
+    genai_pkg.types = types_mod
+
+    with patch.dict(sys.modules, {
+        "google": google_pkg, "google.genai": genai_pkg, "google.genai.types": types_mod,
+    }):
+        model = GoogleEmbeddingModel(api_key="bad-key,good-key")
+        result = model.encode(["text"])
+
+    assert len(result) == 1
+    assert model._key_index == 0  # key[1] succeeded → next is key[0] (wraps from idx=1)
+
+
+def test_google_embedding_multikey_all_fail():
+    """RuntimeError raised when all keys fail with key errors."""
+    from corbell.core.embeddings.model import GoogleEmbeddingModel
+
+    key_err = Exception("invalid key")
+    key_err.code = 403
+    key_err.message = "PERMISSION_DENIED"
+
+    models_mock = MagicMock()
+    models_mock.embed_content.side_effect = key_err
+
+    client_instance = MagicMock()
+    client_instance.models = models_mock
+
+    genai_mod = MagicMock()
+    genai_mod.Client.return_value = client_instance
+
+    types_mod = MagicMock()
+    types_mod.EmbedContentConfig = MagicMock(return_value=MagicMock())
+
+    google_pkg = ModuleType("google")
+    google_pkg.genai = genai_mod
+    genai_pkg = ModuleType("google.genai")
+    genai_pkg.types = types_mod
+
+    with patch.dict(sys.modules, {
+        "google": google_pkg, "google.genai": genai_pkg, "google.genai.types": types_mod,
+    }):
+        model = GoogleEmbeddingModel(api_key="key1,key2")
+        with pytest.raises(RuntimeError, match="All 2 Google API key"):
+            model.encode(["text"])
+
+    # index unchanged from start (0)
+    assert model._key_index == 0
+
+
+def test_google_embedding_nonkey_400_propagates():
+    """A 400 without 'api key' in message is re-raised immediately, not rotated."""
+    from corbell.core.embeddings.model import GoogleEmbeddingModel
+
+    bad_req = Exception("invalid contents field")
+    bad_req.code = 400
+    bad_req.message = "INVALID_ARGUMENT: invalid contents field"
+
+    models_mock = MagicMock()
+    models_mock.embed_content.side_effect = bad_req
+
+    client_instance = MagicMock()
+    client_instance.models = models_mock
+
+    genai_mod = MagicMock()
+    genai_mod.Client.return_value = client_instance
+
+    types_mod = MagicMock()
+    types_mod.EmbedContentConfig = MagicMock(return_value=MagicMock())
+
+    google_pkg = ModuleType("google")
+    google_pkg.genai = genai_mod
+    genai_pkg = ModuleType("google.genai")
+    genai_pkg.types = types_mod
+
+    with patch.dict(sys.modules, {
+        "google": google_pkg, "google.genai": genai_pkg, "google.genai.types": types_mod,
+    }):
+        model = GoogleEmbeddingModel(api_key="key1,key2")
+        with pytest.raises(Exception, match="invalid contents field"):
+            model.encode(["text"])
+
+    # Only one attempt — embed_content called once
+    assert models_mock.embed_content.call_count == 1

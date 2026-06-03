@@ -44,7 +44,7 @@ def codebase_retrieval(
     from corbell.core.workspace import load_workspace
     from corbell.core.embeddings.sqlite_store import SQLiteEmbeddingStore
     from corbell.core.embeddings.search_cache import EmbeddingSearchCache
-    from corbell.core.embeddings.model import SentenceTransformerModel, GoogleEmbeddingModel
+    from corbell.core.embeddings.model import SentenceTransformerModel, GoogleEmbeddingModel, EmbeddingModel
     from corbell.core.graph.sqlite_store import SQLiteGraphStore
     from corbell.core.indexing.builder import IndexBuilder
     from corbell.core.indexing.tracker import IndexTracker
@@ -109,6 +109,7 @@ def codebase_retrieval(
 
     # --- Embedding model ---
     model_name = cfg.storage.model
+    emb_model: EmbeddingModel
     if model_name.startswith("gemini-"):
         emb_model = GoogleEmbeddingModel(model_name)
     else:
