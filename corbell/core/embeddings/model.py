@@ -151,8 +151,15 @@ class GoogleEmbeddingModel(EmbeddingModel):
             return f"title: {resolved_title} | text: {content}"
         return content
 
+    _BATCH_SIZE = 100
+    _MAX_RETRIES = 6
+    _BASE_DELAY = 2.0
+
     def encode(self, texts: List[str], task_type: str = "RETRIEVAL_DOCUMENT") -> List[List[float]]:
         """Encode a list of texts into embedding vectors.
+
+        Batches requests (100 texts/batch) and retries on rate limit (429)
+        with exponential backoff.
 
         Args:
             texts: List of text strings to encode.
@@ -168,32 +175,53 @@ class GoogleEmbeddingModel(EmbeddingModel):
         except ImportError:
             raise ImportError("pip install corbell[google]")
 
+        all_embeddings: List[List[float]] = []
+        for batch_start in range(0, len(texts), self._BATCH_SIZE):
+            batch = texts[batch_start:batch_start + self._BATCH_SIZE]
+            contents = [types.Content(parts=[types.Part(text=t)]) for t in batch]
+            batch_result = self._embed_batch_with_retry(
+                contents, task_type, genai, types
+            )
+            all_embeddings.extend(batch_result)
+
+        return all_embeddings
+
+    def _embed_batch_with_retry(
+        self, contents, task_type: str, genai, types
+    ) -> List[List[float]]:
+        """Embed a single batch, rotating keys and retrying on rate limit."""
+        import time
+
         start = self._key_index
-        errors: List[str] = []
-        for i in range(len(self._api_keys)):
-            idx = (start + i) % len(self._api_keys)
-            key = self._api_keys[idx]
-            try:
-                client = genai.Client(api_key=key)
-                result = client.models.embed_content(
-                    model=self.model_name,
-                    contents=texts,
-                    config=types.EmbedContentConfig(
-                        task_type=task_type,
-                        output_dimensionality=768,
-                    ),
-                )
-                self._key_index = (idx + 1) % len(self._api_keys)
-                return [emb.values for emb in result.embeddings]
-            except Exception as e:
-                if _is_google_key_error(e):
-                    errors.append(f"key[{idx}]: {e}")
-                    continue
-                raise
+        for attempt in range(self._MAX_RETRIES):
+            errors: List[str] = []
+            for i in range(len(self._api_keys)):
+                idx = (start + i) % len(self._api_keys)
+                key = self._api_keys[idx]
+                try:
+                    client = genai.Client(api_key=key)
+                    result = client.models.embed_content(
+                        model=self.model_name,
+                        contents=contents,
+                        config=types.EmbedContentConfig(
+                            task_type=task_type,
+                            output_dimensionality=768,
+                        ),
+                    )
+                    self._key_index = (idx + 1) % len(self._api_keys)
+                    return [emb.values for emb in result.embeddings]
+                except Exception as e:
+                    if _is_google_key_error(e):
+                        errors.append(f"key[{idx}]: {e}")
+                        continue
+                    raise
+
+            delay = self._BASE_DELAY * (2 ** attempt)
+            time.sleep(delay)
 
         raise RuntimeError(
-            f"All {len(self._api_keys)} Google API key(s) failed for embedding:\n"
-            + "\n".join(errors)
+            f"All {len(self._api_keys)} Google API key(s) failed after "
+            f"{self._MAX_RETRIES} retries:\n" + "\n".join(errors)
         )
 
     @property
