@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -212,8 +212,11 @@ def codebase_retrieval(
     # --- LLM rerank ---
     do_rerank = use_llm and rerank and query_config.rerank
     if do_rerank:
+        # Annotate chunks with graph metadata before sending to the reranker
+        graph_meta = _annotate_with_graph_meta(merged, graph_store, cfg.repos)
+
         rerank_start = time.time()
-        reranked_ids = rerank_chunks(query, merged, llm_client)
+        reranked_ids = rerank_chunks(query, merged, llm_client, graph_meta=graph_meta)
         rerank_elapsed = time.time() - rerank_start
         logger.info(
             "Rerank complete: %.3fs, %d/%d chunks kept, order: %s",
@@ -236,6 +239,90 @@ def codebase_retrieval(
         output = f"[warnings: {warning}]\n\n{output}"
 
     return output
+
+
+def _annotate_with_graph_meta(
+    chunks: List[Any],
+    graph_store: Any,
+    repos: List[Any],
+) -> Dict[str, Dict]:
+    """Build a graph metadata dict keyed by chunk_id for each chunk.
+
+    For each chunk, finds overlapping MethodNodes (by file_path + line range)
+    and collects:
+      - callers: number of methods that call into this chunk's method
+      - callees: number of method_call edges outgoing from this chunk's method
+      - flow: name of the first FlowNode that includes this method (or None)
+
+    Args:
+        chunks: List of ScoredChunk objects.
+        graph_store: SQLiteGraphStore instance.
+        repos: List of RepoConfig objects for path resolution.
+
+    Returns:
+        Dict mapping chunk_id -> {"callers": int, "callees": int, "flow": str | None}.
+        Chunks with no matching MethodNode are omitted.
+    """
+    from corbell.core.query.graph_expander import _find_matching_methods
+
+    # Build repo_id → absolute path mapping (same as graph_expander)
+    repo_path_map: Dict[str, Path] = {}
+    for repo in repos:
+        if repo.resolved_path:
+            repo_path_map[repo.id] = repo.resolved_path
+
+    try:
+        all_services = graph_store.get_all_services()
+        service_ids = [s.id for s in all_services]
+    except Exception:
+        return {}
+
+    graph_meta: Dict[str, Dict] = {}
+
+    for chunk in chunks:
+        try:
+            matching_methods = _find_matching_methods(
+                chunk, graph_store, repo_path_map, service_ids
+            )
+        except Exception:
+            continue
+
+        if not matching_methods:
+            continue
+
+        # Aggregate across all overlapping methods (e.g. nested lambdas)
+        total_callers = 0
+        total_callees = 0
+        flow_name: Optional[str] = None
+
+        for method in matching_methods:
+            try:
+                callers = graph_store.get_callers_of_method(method.id)
+                total_callers += len(callers)
+            except Exception:
+                pass
+
+            try:
+                outgoing = graph_store.get_dependencies(method.id)
+                total_callees += sum(1 for e in outgoing if e.kind == "method_call")
+            except Exception:
+                pass
+
+            if flow_name is None:
+                try:
+                    flows = graph_store.get_flows_for_method(method.id)
+                    if flows:
+                        flow_name = flows[0].get("flow_name") or None
+                except Exception:
+                    pass
+
+        graph_meta[chunk.chunk_id] = {
+            "callers": total_callers,
+            "callees": total_callees,
+            "flow": flow_name,
+        }
+
+    return graph_meta
 
 
 def _spawn_background_worker(

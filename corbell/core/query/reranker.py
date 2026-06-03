@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from corbell.core.query.graph_expander import ScoredChunk
@@ -13,6 +13,7 @@ def rerank_chunks(
     query: str,
     chunks: List["ScoredChunk"],
     llm_client: Optional[Any],
+    graph_meta: Optional[Dict[str, Dict]] = None,
 ) -> List[str]:
     """Rerank and filter query results using an LLM.
 
@@ -26,6 +27,9 @@ def rerank_chunks(
         query: The original user query.
         chunks: Scored chunks to rerank.
         llm_client: An LLMClient instance (or None / unconfigured).
+        graph_meta: Optional dict mapping chunk_id to graph metadata
+            (callers count, callees count, flow name). When provided,
+            metadata is included in the chunk header sent to the LLM.
 
     Returns:
         List of chunk_ids in reranked order (most relevant first).
@@ -43,8 +47,20 @@ def rerank_chunks(
     # Build payload with code content, indexed for compact LLM output
     entries = []
     for i, chunk in enumerate(chunks):
+        meta = graph_meta.get(chunk.chunk_id) if graph_meta else None
+        if meta:
+            callers = meta.get("callers", 0)
+            callees = meta.get("callees", 0)
+            flow = meta.get("flow")
+            if flow:
+                meta_str = f"score={chunk.score:.2f}, callers={callers}, callees={callees}, flow={flow}"
+            else:
+                meta_str = f"score={chunk.score:.2f}, callers={callers}, callees={callees}"
+        else:
+            meta_str = f"score={chunk.score:.2f}"
+
         entry = (
-            f"[{i}] {chunk.file_path}:{chunk.start_line}-{chunk.end_line}"
+            f"[{i}] {meta_str} | {chunk.file_path}:{chunk.start_line}-{chunk.end_line}"
             f" ({chunk.chunk_type}, {chunk.symbol or 'no symbol'})\n"
             f"{chunk.content}"
         )
@@ -52,9 +68,11 @@ def rerank_chunks(
 
     system = (
         "You are a code search relevance ranker. "
-        "Given a query and numbered code chunks, return a JSON array of chunk "
-        "indices (integers) ordered from most relevant to least relevant. "
+        "Given a query and numbered code chunks with metadata (relevance score, callers count, "
+        "callees count, flow membership), return a JSON array of chunk indices ordered from most "
+        "relevant to least relevant. "
         "OMIT chunks that are not relevant to the query. "
+        "Higher score, more callers, and flow membership indicate higher structural importance. "
         "Return ONLY a valid JSON array of integers, e.g. [2,0,5]."
     )
 
