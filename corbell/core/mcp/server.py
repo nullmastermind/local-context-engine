@@ -128,12 +128,15 @@ async def codebase_retrieval_tool(
             )
 
         def _run_pipeline():
+            from corbell.core.workspace import build_config
+
+            cfg = build_config(ws_path)
             return codebase_retrieval(
                 query=information_request,
                 workspace_path=ws_path,
-                top_k=50,
+                top_k=cfg.query.top_k,
                 use_llm=True,
-                rerank=True,
+                rerank=cfg.query.rerank,
             )
 
         return await anyio.to_thread.run_sync(_run_pipeline, cancellable=True)

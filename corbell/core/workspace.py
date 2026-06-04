@@ -42,7 +42,7 @@ class StorageConfig(BaseModel):
 class QueryConfig(BaseModel):
     """Query pipeline configuration."""
 
-    top_k: int = 50
+    top_k: int = 24
     expand_call_depth: int = 2
     expand_max_chunks: int = 30
     rerank: bool = True
@@ -55,8 +55,8 @@ class IndexingConfig(BaseModel):
 
     skip_dirs: List[str] = Field(default_factory=list)
     max_file_bytes: int = 1024 * 1024  # 1 MB
-    chunk_size: int = 50
-    chunk_overlap: int = 10
+    chunk_size: int = 32
+    chunk_overlap: int = 8
 
     model_config = {"extra": "ignore"}
 
@@ -379,9 +379,9 @@ def build_config(workspace_path: Path) -> WorkspaceConfig:
     workspace_path = workspace_path.resolve()
 
     # Parse env vars
-    top_k = int(os.environ.get("CORBELL_TOP_K", "50"))
-    chunk_size = int(os.environ.get("CORBELL_CHUNK_SIZE", "50"))
-    chunk_overlap = int(os.environ.get("CORBELL_CHUNK_OVERLAP", "10"))
+    top_k = int(os.environ.get("CORBELL_TOP_K", "24"))
+    chunk_size = int(os.environ.get("CORBELL_CHUNK_SIZE", "32"))
+    chunk_overlap = int(os.environ.get("CORBELL_CHUNK_OVERLAP", "8"))
     expand_call_depth = int(os.environ.get("CORBELL_EXPAND_CALL_DEPTH", "2"))
     expand_max_chunks = int(os.environ.get("CORBELL_EXPAND_MAX_CHUNKS", "30"))
     rerank_str = os.environ.get("CORBELL_RERANK", "true").lower()
