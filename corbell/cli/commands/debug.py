@@ -148,7 +148,7 @@ def debug(
 
         with gr.Tabs():
             with gr.Tab("Final Results"):
-                final_output = gr.Markdown(label="Formatted Output")
+                final_output = gr.Code(label="Formatted Output", language=None)
 
             with gr.Tab("Pre-Rerank Chunks"):
                 pre_rerank_table = gr.Dataframe(

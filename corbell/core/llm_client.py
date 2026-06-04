@@ -153,7 +153,7 @@ class LLMClient:
         self,
         system_prompt: str,
         user_prompt: str,
-        max_tokens: int = 8000,
+        max_tokens: int = 128000,
         temperature: float = 0.1,
         request_type: Optional[str] = None,
     ) -> str:

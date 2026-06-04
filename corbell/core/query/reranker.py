@@ -129,7 +129,6 @@ def rerank_chunks(
     try:
         response = llm_client.call(
             system, user,
-            max_tokens=200,
             temperature=0.0,
         )
         raw_response = response
