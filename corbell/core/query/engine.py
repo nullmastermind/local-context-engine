@@ -8,6 +8,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
+
+from corbell.core.workspace import build_config, db_path_for_workspace
+from corbell.core.embeddings.sqlite_store import SQLiteEmbeddingStore
+from corbell.core.embeddings.search_cache import EmbeddingSearchCache
+from corbell.core.embeddings.model import GoogleEmbeddingModel, VoyageEmbeddingModel, EmbeddingModel
+from corbell.core.graph.sqlite_store import SQLiteGraphStore
+from corbell.core.indexing.builder import IndexBuilder
+from corbell.core.indexing.tracker import IndexTracker
+from corbell.core.query.diagnostics import QueryDiagnostics
+from corbell.core.query.graph_expander import ScoredChunk, expand_via_graph
+from corbell.core.query.merger import merge_and_dedup
+from corbell.core.query.reranker import rerank_chunks
+from corbell.core.query.formatter import format_results
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,19 +61,6 @@ def _execute_pipeline(
     Returns:
         Tuple of (formatted_output_string, diagnostics).
     """
-    from corbell.core.workspace import build_config, db_path_for_workspace
-    from corbell.core.embeddings.sqlite_store import SQLiteEmbeddingStore
-    from corbell.core.embeddings.search_cache import EmbeddingSearchCache
-    from corbell.core.embeddings.model import GoogleEmbeddingModel, VoyageEmbeddingModel, EmbeddingModel
-    from corbell.core.graph.sqlite_store import SQLiteGraphStore
-    from corbell.core.indexing.builder import IndexBuilder
-    from corbell.core.indexing.tracker import IndexTracker
-    from corbell.core.query.diagnostics import QueryDiagnostics
-    from corbell.core.query.graph_expander import ScoredChunk, expand_via_graph
-    from corbell.core.query.merger import merge_and_dedup
-    from corbell.core.query.reranker import rerank_chunks
-    from corbell.core.query.formatter import format_results
-
     if diagnostics is None:
         diagnostics = QueryDiagnostics()
 
@@ -69,11 +71,16 @@ def _execute_pipeline(
             diagnostics,
         )
 
+    _t_cfg = time.time()
     cfg = build_config(workspace_path)
+    logger.info("engine build_config: (%.3fs)", time.time() - _t_cfg)
+
+    _t_db = time.time()
     db_path = db_path_for_workspace(workspace_path, model=cfg.storage.resolved_model())
     emb_store = SQLiteEmbeddingStore(db_path)
     graph_store = SQLiteGraphStore(db_path)
     tracker = IndexTracker(db_path)
+    logger.info("engine open_stores: (%.3fs) db=%s", time.time() - _t_db, db_path)
 
     # --- Auto-index check ---
     chunk_count = emb_store.count()
@@ -85,13 +92,18 @@ def _execute_pipeline(
     # Short-circuit: skip stale check if a build finished within the last 30 seconds
     last_build = tracker.get_last_build_at()
     if last_build is None or (time.time() - last_build) >= 30:
+        _t_stale = time.time()
         stale_result = tracker.get_stale_files(cfg.repos, cfg)
+        logger.info("engine stale check: has_changes=%s (%.3fs)", stale_result.has_changes, time.time() - _t_stale)
         if stale_result.has_changes:
             # Always do a blocking incremental rebuild when stale
+            _t_build = time.time()
             builder = IndexBuilder()
             builder.build(cfg, db_path, rebuild=False, progress_fn=lambda msg: logger.info(msg))
+            logger.info("engine incremental rebuild done (%.3fs)", time.time() - _t_build)
 
     # --- LLM client setup ---
+    _t_llm = time.time()
     llm_client: Optional[Any] = None
     if use_llm:
         from corbell.core.llm_client import LLMClient
@@ -107,11 +119,16 @@ def _execute_pipeline(
             gcp_project=llm_cfg.gcp_project,
             gcp_region=llm_cfg.gcp_region,
         )
+    logger.info("engine llm_client_setup: (%.3fs) provider=%s model=%s",
+                time.time() - _t_llm,
+                cfg.llm.provider if use_llm else "none",
+                cfg.llm.resolved_model() if use_llm else "none")
 
     # --- Search queries ---
     search_queries = [query]
 
     # --- Embedding model ---
+    _t_emb_init = time.time()
     model_name = cfg.storage.resolved_model()
     emb_model: EmbeddingModel
     if model_name.startswith("gemini-"):
@@ -125,23 +142,28 @@ def _execute_pipeline(
             f"  - voyage-code-3 or voyage-4-lite (requires VOYAGE_API_KEY)\n"
             f"  - gemini-embedding-001 (requires GOOGLE_API_KEY)"
         )
+    logger.info("engine emb_model_init: (%.3fs) model=%s", time.time() - _t_emb_init, model_name)
 
     # --- Load search cache ---
+    _t_cache = time.time()
     cache = EmbeddingSearchCache()
     cache.load(emb_store)
+    logger.info("engine cache.load: (%.3fs)", time.time() - _t_cache)
 
     if not cache.is_loaded:
         return "No index found. Run 'corbell index build' first.", diagnostics
 
     # --- Embedding search ---
-    import numpy as np
-
     all_embedding_results: dict[str, ScoredChunk] = {}
     query_config = cfg.query
+
+    logger.info("engine pre-encode: search_queries=%s, model_type=%s", search_queries, type(emb_model).__name__)
 
     t0 = time.time()
     try:
         for sq in search_queries:
+            _t_enc = time.time()
+            logger.info("engine encode start: query=%r", sq[:80])
             try:
                 if isinstance(emb_model, GoogleEmbeddingModel):
                     formatted_query = (
@@ -157,6 +179,7 @@ def _execute_pipeline(
                     f"Error: Failed to encode query with embedding model '{model_name}': {exc}",
                     diagnostics,
                 )
+            logger.info("engine query encode: (%.3fs)", time.time() - _t_enc)
 
             q_vec = np.array(q_vecs[0], dtype=np.float32)
             hits = cache.search(q_vec, top_k=top_k)
@@ -224,6 +247,7 @@ def _execute_pipeline(
         )
     finally:
         diagnostics.record_time("graph_expansion", time.time() - t0)
+        logger.info("engine graph_expansion: (%.3fs)", time.time() - t0)
 
     all_chunks = base_chunks + bonus_chunks
 
@@ -254,6 +278,7 @@ def _execute_pipeline(
             merged = merged[:top_k]
     finally:
         diagnostics.record_time("merge_dedup", time.time() - t0)
+        logger.info("engine merge_dedup: (%.3fs)", time.time() - t0)
 
     # Capture pre-rerank state for debug mode
     if diagnostics.collect_debug:
@@ -265,7 +290,9 @@ def _execute_pipeline(
         do_rerank = use_llm and rerank and query_config.rerank
         if do_rerank:
             # Annotate chunks with graph metadata before sending to the reranker
+            _t_ann = time.time()
             graph_meta = _annotate_with_graph_meta(merged, graph_store, cfg.repos)
+            logger.info("engine annotate_graph_meta: (%.3fs)", time.time() - _t_ann)
 
             rerank_result = rerank_chunks(query, merged, llm_client, graph_meta=graph_meta)
             reranked_ids = rerank_result.chunk_ids

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import List, Optional
@@ -205,30 +204,49 @@ def detect_git_branch(workspace_path: Path) -> str:
 
     Returns the branch name, ``"detached-<short-sha>"`` for detached HEAD,
     or ``"_no_git"`` when git is unavailable or the directory is not a repo.
+
+    Reads .git/HEAD directly to avoid subprocess overhead and timeout issues
+    on Windows. Falls back to subprocess only for worktrees (.git is a file).
     """
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-            cwd=str(workspace_path),
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            branch = result.stdout.strip()
-            if branch and branch != "HEAD":
-                return branch
-            result2 = subprocess.run(
-                ["git", "rev-parse", "--short", "HEAD"],
-                cwd=str(workspace_path),
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result2.returncode == 0:
-                return f"detached-{result2.stdout.strip()}"
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    git_dir = workspace_path / ".git"
+
+    # Standard repo: .git is a directory with HEAD file
+    if git_dir.is_dir():
+        head_file = git_dir / "HEAD"
+        if head_file.exists():
+            try:
+                content = head_file.read_text(encoding="utf-8").strip()
+                if content.startswith("ref: refs/heads/"):
+                    return content[len("ref: refs/heads/"):]
+                if content.startswith("ref: "):
+                    return content[len("ref: "):]
+                # Detached HEAD — content is a full SHA
+                if len(content) >= 7:
+                    return f"detached-{content[:7]}"
+            except OSError:
+                pass
+        return "_no_git"
+
+    # Worktree or submodule: .git is a file pointing elsewhere
+    if git_dir.is_file():
+        try:
+            pointer = git_dir.read_text(encoding="utf-8").strip()
+            if pointer.startswith("gitdir: "):
+                real_git_dir = Path(pointer[len("gitdir: "):])
+                if not real_git_dir.is_absolute():
+                    real_git_dir = (workspace_path / real_git_dir).resolve()
+                head_file = real_git_dir / "HEAD"
+                if head_file.exists():
+                    content = head_file.read_text(encoding="utf-8").strip()
+                    if content.startswith("ref: refs/heads/"):
+                        return content[len("ref: refs/heads/"):]
+                    if content.startswith("ref: "):
+                        return content[len("ref: "):]
+                    if len(content) >= 7:
+                        return f"detached-{content[:7]}"
+        except OSError:
+            pass
+
     return "_no_git"
 
 

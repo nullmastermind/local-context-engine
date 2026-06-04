@@ -304,15 +304,27 @@ class VoyageEmbeddingModel(EmbeddingModel):
         Returns:
             List of float vectors (one per input text).
         """
+        import time as _time
+
         try:
+            _t_import = _time.time()
             import voyageai
+            logger.info(
+                "VoyageEmbeddingModel.encode: texts=%d, input_type=%s, model=%s, import_time=%.3fs",
+                len(texts), input_type, self.model_name, _time.time() - _t_import,
+            )
         except ImportError:
             raise ImportError("pip install corbell[voyage]")
 
         all_embeddings: List[List[float]] = []
         for batch_start in range(0, len(texts), self._BATCH_SIZE):
             batch = texts[batch_start:batch_start + self._BATCH_SIZE]
+            _t_batch = _time.time()
             batch_result = self._embed_batch_with_retry(batch, input_type, voyageai)
+            logger.info(
+                "VoyageEmbeddingModel batch[%d:%d] done (%.3fs)",
+                batch_start, batch_start + len(batch), _time.time() - _t_batch,
+            )
             all_embeddings.extend(batch_result)
 
         return all_embeddings
@@ -338,7 +350,13 @@ class VoyageEmbeddingModel(EmbeddingModel):
                 idx = (start + i) % len(self._api_keys)
                 key = self._api_keys[idx]
                 try:
+                    _t_api = time.time()
+                    logger.info(
+                        "Voyage API call: key[%d], model=%s, input_type=%s, batch_size=%d, creating_client...",
+                        idx, self.model_name, input_type, len(batch),
+                    )
                     vo = voyageai.Client(api_key=key)
+                    logger.info("Voyage client created (%.3fs), calling embed...", time.time() - _t_api)
                     kwargs: dict = {
                         "model": self.model_name,
                         "input_type": input_type,
@@ -347,9 +365,16 @@ class VoyageEmbeddingModel(EmbeddingModel):
                     if "output_dimension" in inspect.signature(vo.embed).parameters:
                         kwargs["output_dimension"] = self.dimension
                     result = vo.embed(batch, **kwargs)
+                    logger.info(
+                        "Voyage API success: key[%d] (%.3fs)", idx, time.time() - _t_api,
+                    )
                     self._key_index = (idx + 1) % len(self._api_keys)
                     return result.embeddings
                 except Exception as e:
+                    logger.info(
+                        "Voyage API error: key[%d] (%.3fs) %s: %s",
+                        idx, time.time() - _t_api, type(e).__name__, e,
+                    )
                     if _is_voyage_rate_limit_error(e):
                         errors.append(f"key[{idx}]: {e}")
                         continue
