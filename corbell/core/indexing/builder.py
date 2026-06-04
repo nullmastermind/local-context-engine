@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -72,11 +72,74 @@ def _get_worker_count() -> int:
 
 _API_BATCH_SIZE = 100  # conservative limit for API-backed embedding models
 
+# Super-batch size: number of chunks streamed to the embedding store at a time.
+# Keeps peak memory bounded regardless of total corpus size.
+# Override via CORBELL_EMBED_BATCH env var.
+_SUPER_BATCH_SIZE: int = max(1, int(os.environ.get("CORBELL_EMBED_BATCH", "500") or "500"))
+
+_ENCODE_MAX_RETRIES = 3
+_ENCODE_BASE_DELAY = 2.0
+
+
+def _encode_batch_with_retry(model: Any, batch: List[str]) -> List[Any]:
+    """Encode a single text batch, retrying on transient errors.
+
+    Rate-limit (429) is already handled inside model.encode() via key rotation
+    and backoff.  This wrapper catches transient network/server errors (timeouts,
+    connection resets, 5xx) and retries up to ``_ENCODE_MAX_RETRIES`` times with
+    exponential backoff before propagating.
+    """
+    for attempt in range(_ENCODE_MAX_RETRIES):
+        try:
+            return model.encode(batch)
+        except Exception as e:
+            status = getattr(e, "status_code", None) or getattr(e, "code", None)
+            is_transient = (
+                isinstance(e, (OSError, TimeoutError, ConnectionError))
+                or (isinstance(status, int) and status >= 500)
+            )
+            if not is_transient or attempt == _ENCODE_MAX_RETRIES - 1:
+                raise
+            delay = _ENCODE_BASE_DELAY * (2 ** attempt)
+            logger.warning(
+                "Transient embedding error (attempt %d/%d): %s. Retrying in %.0fs...",
+                attempt + 1, _ENCODE_MAX_RETRIES, e, delay,
+            )
+            time.sleep(delay)
+    return []  # unreachable, satisfies type checker
+
+
+def _get_embed_concurrency(model: Any) -> int:
+    """Return the number of concurrent embedding API threads to use.
+
+    Checks ``CORBELL_EMBED_CONCURRENCY`` env var first; falls back to a
+    provider-aware default:
+    - VoyageEmbeddingModel  → 30
+    - GoogleEmbeddingModel  → 8
+    - unknown               → 4
+    """
+    env_val = os.environ.get("CORBELL_EMBED_CONCURRENCY", "").strip()
+    if env_val:
+        try:
+            return max(1, int(env_val))
+        except ValueError:
+            pass
+
+    from corbell.core.embeddings.model import GoogleEmbeddingModel, VoyageEmbeddingModel
+
+    if isinstance(model, VoyageEmbeddingModel):
+        return 30
+    if isinstance(model, GoogleEmbeddingModel):
+        return 8
+    return 4
+
 
 def _encode_chunks(model: Any, chunks: List[Any]) -> List[Any]:
     """Encode chunks and attach embeddings in-place.
 
-    Batches into groups of ``_API_BATCH_SIZE`` to stay within rate limits.
+    Batches into groups of ``_API_BATCH_SIZE`` and submits each batch as a
+    concurrent task via :class:`~concurrent.futures.ThreadPoolExecutor`.
+    The number of concurrent threads is determined by :func:`_get_embed_concurrency`.
 
     Args:
         model: An EmbeddingModel instance.
@@ -105,10 +168,26 @@ def _encode_chunks(model: Any, chunks: List[Any]) -> List[Any]:
     else:
         texts = [c.content for c in chunks]
 
+    # Split texts into API-sized batches and encode concurrently.
+    batches = [texts[i : i + _API_BATCH_SIZE] for i in range(0, len(texts), _API_BATCH_SIZE)]
+    concurrency = _get_embed_concurrency(model)
+
+    # Use a list pre-sized to the number of batches so we can store results in order.
+    batch_vectors: List[Any] = [None] * len(batches)
+
+    with ThreadPoolExecutor(max_workers=concurrency) as executor:
+        future_to_idx = {
+            executor.submit(_encode_batch_with_retry, model, batch): idx
+            for idx, batch in enumerate(batches)
+        }
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            batch_vectors[idx] = future.result()
+
+    # Flatten ordered results and assign to chunks.
     vectors: List[Any] = []
-    for i in range(0, len(texts), _API_BATCH_SIZE):
-        batch_texts = texts[i : i + _API_BATCH_SIZE]
-        vectors.extend(model.encode(batch_texts))
+    for vecs in batch_vectors:
+        vectors.extend(vecs)
 
     for chunk, vec in zip(chunks, vectors):
         chunk.embedding = vec
@@ -388,11 +467,16 @@ class IndexBuilder:
                 progress_fn(f"Indexing {repo_id} ({len(chunks)} chunks)...")
 
             if chunks:
-                # Encode all chunks for this repo
-                _encode_chunks(model, chunks)
-
-                # CRASH-SAFE: commit chunks first, then update meta
-                emb_store.upsert_batch(chunks)
+                # Stream in super-batches: encode + commit one bounded slice at a time.
+                # Committing per super-batch keeps SQLite WAL bounded (not corpus-sized).
+                # CRASH-SAFE: mark_indexed is called AFTER all super-batches are committed,
+                # so partial commits from a crash are cleaned up via delete_by_file on restart.
+                with emb_store.connection() as conn:
+                    for i in range(0, len(chunks), _SUPER_BATCH_SIZE):
+                        super_batch = chunks[i : i + _SUPER_BATCH_SIZE]
+                        _encode_chunks(model, super_batch)
+                        emb_store.upsert_batch(super_batch, conn=conn)
+                        conn.commit()
                 total_chunks += len(chunks)
 
                 # Mark each file as indexed AFTER chunks are committed
@@ -550,11 +634,15 @@ class IndexBuilder:
                         logger.warning("Failed to extract %s: %s", file_info[0], exc)
 
             if chunks:
-                # Encode all chunks for this repo batch
-                _encode_chunks(model, chunks)
-
-                # CRASH-SAFE: commit chunks first
-                emb_store.upsert_batch(chunks)
+                # Stream in super-batches: encode + commit one bounded slice at a time.
+                # CRASH-SAFE: mark_indexed is called AFTER all super-batches are committed,
+                # so partial commits from a crash are cleaned up via delete_by_file on restart.
+                with emb_store.connection() as conn:
+                    for i in range(0, len(chunks), _SUPER_BATCH_SIZE):
+                        super_batch = chunks[i : i + _SUPER_BATCH_SIZE]
+                        _encode_chunks(model, super_batch)
+                        emb_store.upsert_batch(super_batch, conn=conn)
+                        conn.commit()
                 total_chunks += len(chunks)
 
             # Mark all processed files as indexed AFTER commit

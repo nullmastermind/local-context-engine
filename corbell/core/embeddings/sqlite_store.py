@@ -7,8 +7,9 @@ Implements :class:`~corbell.core.embeddings.base.EmbeddingStore`.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Generator, List, Optional, Tuple
 
 import numpy as np
 
@@ -50,6 +51,33 @@ class SQLiteEmbeddingStore(EmbeddingStore):
         conn.row_factory = sqlite3.Row
         return conn
 
+    @contextmanager
+    def connection(self) -> Generator[sqlite3.Connection, None, None]:
+        """Yield a reusable :class:`sqlite3.Connection` with WAL mode enabled.
+
+        Intended for long-running write sessions (e.g. streaming super-batches)
+        where the caller wants to control commit granularity and avoid the
+        open/close overhead of :meth:`_conn` on every call.
+
+        The connection is NOT auto-committed or closed on exit — the caller is
+        responsible for calling ``conn.commit()`` at appropriate checkpoints and
+        the context manager closes the connection when the ``with`` block exits.
+
+        Example::
+
+            with emb_store.connection() as conn:
+                for batch in batches:
+                    emb_store.upsert_batch(batch, conn=conn)
+                conn.commit()
+        """
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        try:
+            yield conn
+        finally:
+            conn.close()
+
     def _init_db(self) -> None:
         with self._conn() as conn:
             conn.execute(_CREATE_CHUNKS)
@@ -85,31 +113,48 @@ class SQLiteEmbeddingStore(EmbeddingStore):
             )
             conn.commit()
 
-    def upsert_batch(self, records: List[EmbeddingRecord]) -> None:
-        """Bulk-upsert a list of records."""
-        with self._conn() as conn:
-            for record in records:
-                emb_blob = self._vec_to_blob(record.embedding) if record.embedding else None
-                conn.execute(
-                    """INSERT OR REPLACE INTO embedding_chunks
-                       (id, service_id, repo, file_path, start_line, end_line,
-                        content, language, chunk_type, symbol, embedding)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        record.id,
-                        record.service_id,
-                        record.repo,
-                        record.file_path,
-                        record.start_line,
-                        record.end_line,
-                        record.content,
-                        record.language,
-                        record.chunk_type,
-                        record.symbol,
-                        emb_blob,
-                    ),
-                )
-            conn.commit()
+    def upsert_batch(
+        self,
+        records: List[EmbeddingRecord],
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> None:
+        """Bulk-upsert a list of records.
+
+        Args:
+            records: Embedding records to insert or replace.
+            conn: Optional reusable connection (from :meth:`connection`).  When
+                provided the caller owns commit/close semantics; this method only
+                executes the statement.  When *not* provided a new connection is
+                opened and auto-committed after the batch.
+        """
+        _SQL = (
+            "INSERT OR REPLACE INTO embedding_chunks "
+            "(id, service_id, repo, file_path, start_line, end_line, "
+            "content, language, chunk_type, symbol, embedding) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        params = [
+            (
+                r.id,
+                r.service_id,
+                r.repo,
+                r.file_path,
+                r.start_line,
+                r.end_line,
+                r.content,
+                r.language,
+                r.chunk_type,
+                r.symbol,
+                self._vec_to_blob(r.embedding) if r.embedding else None,
+            )
+            for r in records
+        ]
+        if conn is not None:
+            conn.executemany(_SQL, params)
+        else:
+            with self._conn() as _conn:
+                _conn.executemany(_SQL, params)
+                _conn.commit()
 
     # ------------------------------------------------------------------ #
     # Read / Search                                                        #
