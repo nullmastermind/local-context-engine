@@ -18,16 +18,6 @@ That's it. The AI agent passes workspace path and triggers index builds automati
 
 ---
 
-## Build index manually (optional)
-
-```bash
-uvx codebase-retrieval-context-engine index build
-```
-
-Run from your project root. Env vars (`CORBELL_LLM_PROVIDER`, `GOOGLE_API_KEY`, etc.) must be set in your shell.
-
----
-
 ## Environment variables
 
 | Variable | Description |

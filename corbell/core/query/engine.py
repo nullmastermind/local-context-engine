@@ -154,8 +154,7 @@ def _execute_pipeline(
                     q_vecs = emb_model.encode([sq])
             except Exception as exc:
                 return (
-                    f"Error: Failed to load embedding model '{model_name}'. "
-                    f"Ensure 'sentence-transformers' is installed. ({exc})",
+                    f"Error: Failed to encode query with embedding model '{model_name}': {exc}",
                     diagnostics,
                 )
 
