@@ -100,7 +100,7 @@ def rerank_chunks(
         entry = (
             f"[{i}] {meta_str} | {chunk.file_path}:{chunk.start_line}-{chunk.end_line}"
             f" ({chunk.chunk_type}, {chunk.symbol or 'no symbol'})\n"
-            f"{content}"
+            f"<content chunk-index=\"{i}\">\n{content}\n</content>"
         )
         entries.append(entry)
 
