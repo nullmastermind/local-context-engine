@@ -40,6 +40,8 @@ def load_gitignore(repo_path: Path) -> pathspec.PathSpec:
         rel = gi.parent.relative_to(repo_path)
         if any(part in SKIP_DIRS for part in rel.parts):
             continue
+        if any(part.startswith(".") for part in rel.parts):
+            continue
         lines.extend(_read_patterns(gi, rel_dir=str(rel).replace("\\", "/")))
 
     return pathspec.PathSpec.from_lines("gitwildmatch", lines)

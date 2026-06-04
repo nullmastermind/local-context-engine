@@ -45,6 +45,7 @@ _TS_MODULES: Dict[str, str] = {
     "go":         "tree_sitter_go",
     "java":       "tree_sitter_java",
     "csharp":     "tree_sitter_c_sharp",
+    "cpp":        "tree_sitter_cpp",
     "rust":       "tree_sitter_rust",
     "ruby":       "tree_sitter_ruby",
     "php":        "tree_sitter_php",
@@ -102,6 +103,10 @@ _TS_TARGET_NODES: Dict[str, Set[str]] = {
         "function_definition",
         "method_declaration",
     },
+    "cpp": {
+        "function_definition",
+        "declaration",
+    },
 }
 
 # Child field names that hold the identifier for each language's function node
@@ -112,6 +117,7 @@ _TS_NAME_FIELDS: Dict[str, List[str]] = {
     "go":         ["name"],
     "java":       ["name"],
     "csharp":     ["name"],
+    "cpp":        ["declarator"],
     "rust":       ["name"],
     "ruby":       ["name"],
     "php":        ["name"],
@@ -135,6 +141,14 @@ _EXT_LANG = {
     ".rs":   "rust",
     ".rb":   "ruby",
     ".php":  "php",
+    ".c":    "cpp",
+    ".cc":   "cpp",
+    ".cpp":  "cpp",
+    ".cxx":  "cpp",
+    ".h":    "cpp",
+    ".hh":   "cpp",
+    ".hpp":  "cpp",
+    ".hxx":  "cpp",
 }
 
 # ---------------------------------------------------------------------------
@@ -152,6 +166,7 @@ _TS_CALL_SITE_NODES: Dict[str, Set[str]] = {
     "rust":       {"call_expression", "macro_invocation"},
     "ruby":       {"call"},
     "php":        {"function_call_expression", "member_call_expression", "scoped_call_expression", "object_creation_expression"},
+    "cpp":        {"call_expression"},
 }
 
 # ---------------------------------------------------------------------------
@@ -243,6 +258,90 @@ _BUILTIN_BLOCKLIST: Dict[str, Set[str]] = {
 # Add typescript as alias of javascript builtins
 _BUILTIN_BLOCKLIST["typescript"] = _BUILTIN_BLOCKLIST["javascript"]
 _BUILTIN_BLOCKLIST["tsx"] = _BUILTIN_BLOCKLIST["javascript"]
+
+
+# ---------------------------------------------------------------------------
+# Body-end estimation helpers (shared by all regex fallbacks)
+# ---------------------------------------------------------------------------
+
+
+def _find_body_end(lines: List[str], start_idx: int) -> int:
+    """Estimate the 1-based line number where a brace-delimited body ends.
+
+    Scans from *start_idx* (0-based) for the opening ``{``, then counts
+    matching braces until the body closes. Skips braces inside string
+    literals, ``//`` comments, and block-comment lines.
+
+    Returns the 1-based line number of the closing ``}``, or
+    ``start_idx + 1`` (i.e. just the signature line) when no body is found.
+    """
+    n = len(lines)
+    brace_found = False
+    scan_start = start_idx
+
+    for idx in range(start_idx, min(start_idx + 4, n)):
+        line = lines[idx]
+        comment_pos = line.find("//")
+        if comment_pos >= 0:
+            line = line[:comment_pos]
+        if "{" in line:
+            scan_start = idx
+            brace_found = True
+            break
+
+    if not brace_found:
+        return start_idx + 1
+
+    depth = 0
+    bail_at = min(scan_start + 500, n)
+    for idx in range(scan_start, bail_at):
+        raw = lines[idx]
+        stripped = raw.lstrip()
+        if stripped.startswith("*") or stripped.startswith("/*"):
+            continue
+        comment_pos = raw.find("//")
+        if comment_pos >= 0:
+            raw = raw[:comment_pos]
+        in_str: Optional[str] = None
+        for i, ch in enumerate(raw):
+            if in_str:
+                if ch == in_str and (i == 0 or raw[i - 1] != "\\"):
+                    in_str = None
+            elif ch in ('"', "'"):
+                in_str = ch
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return idx + 1
+
+    return start_idx + 1
+
+
+def _find_ruby_body_end(lines: List[str], start_idx: int) -> int:
+    """Estimate the 1-based line number where a Ruby ``end``-delimited body ends."""
+    OPENERS = re.compile(
+        r"\b(def|class|module|do|if|unless|while|until|for|case|begin)\b"
+    )
+    CLOSER = re.compile(r"^\s*end\b")
+
+    n = len(lines)
+    depth = 0
+    bail_at = min(start_idx + 500, n)
+
+    for idx in range(start_idx, bail_at):
+        line = lines[idx]
+        comment_pos = line.find("#")
+        if comment_pos >= 0:
+            line = line[:comment_pos]
+        depth += len(OPENERS.findall(line))
+        if CLOSER.match(lines[idx]):
+            depth -= 1
+        if depth <= 0 and idx > start_idx:
+            return idx + 1
+
+    return start_idx + 1
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +441,8 @@ class MethodGraphBuilder:
                 # (avoids false-positives from matching path segments like 'corbel')
                 rel = fp.relative_to(repo_path)
                 if any(part in _SKIP_DIRS for part in rel.parts):
+                    continue
+                if any(part.startswith(".") for part in rel.parts[:-1]):
                     continue
                 if gitignore_spec.match_file(str(rel).replace("\\", "/")):
                     continue
@@ -881,6 +982,8 @@ class MethodGraphBuilder:
             return self._regex_java(fp, content, service_id)
         if lang == "csharp":
             return self._regex_csharp(fp, content, service_id)
+        if lang == "cpp":
+            return self._regex_cpp(fp, content, service_id)
         if lang == "rust":
             return self._regex_rust(fp, content, service_id)
         if lang == "ruby":
@@ -935,7 +1038,8 @@ class MethodGraphBuilder:
                 methods.append({
                     "id": mid, "name": raw, "full_name": full,
                     "class_name": current_class if kind == "class_method" else None,
-                    "file_path": str(fp), "line_number": lnum, "line_end": lnum,
+                    "file_path": str(fp), "line_number": lnum,
+                    "line_end": _find_body_end(lines, lnum - 1),
                     "signature": raw, "docstring": None, "service_id": service_id,
                 })
                 break
@@ -943,8 +1047,9 @@ class MethodGraphBuilder:
 
     def _regex_go(self, fp: Path, content: str, service_id: str) -> Dict:
         methods: List[Dict] = []
+        lines = content.splitlines()
         pat = re.compile(r"^func\s+(?:\([^)]+\)\s+)?(\w+)\s*\(")
-        for lnum, line in enumerate(content.splitlines(), 1):
+        for lnum, line in enumerate(lines, 1):
             m = pat.match(line)
             if m:
                 mname = m.group(1)
@@ -957,18 +1062,19 @@ class MethodGraphBuilder:
                 methods.append({
                     "id": mid, "name": mname, "full_name": mname,
                     "class_name": None, "file_path": str(fp),
-                    "line_number": lnum, "line_end": lnum,
+                    "line_number": lnum, "line_end": _find_body_end(lines, lnum - 1),
                     "signature": mname, "docstring": None, "service_id": service_id,
                 })
         return {"methods": methods, "calls": []}
 
     def _regex_java(self, fp: Path, content: str, service_id: str) -> Dict:
         methods: List[Dict] = []
+        lines = content.splitlines()
         pat = re.compile(
             r"(?:public|private|protected|static|\s)+[\w<>\[\]]+\s+(\w+)\s*\([^)]*\)\s*\{?"
         )
         skip = {"if", "for", "while", "switch", "catch", "class"}
-        for lnum, line in enumerate(content.splitlines(), 1):
+        for lnum, line in enumerate(lines, 1):
             m = pat.search(line)
             if m and m.group(1) not in skip and "class " not in line:
                 mname = m.group(1)
@@ -981,18 +1087,19 @@ class MethodGraphBuilder:
                 methods.append({
                     "id": mid, "name": mname, "full_name": mname,
                     "class_name": None, "file_path": str(fp),
-                    "line_number": lnum, "line_end": lnum,
+                    "line_number": lnum, "line_end": _find_body_end(lines, lnum - 1),
                     "signature": mname, "docstring": None, "service_id": service_id,
                 })
         return {"methods": methods, "calls": []}
 
     def _regex_csharp(self, fp: Path, content: str, service_id: str) -> Dict:
         methods: List[Dict] = []
+        lines = content.splitlines()
         pat = re.compile(
             r"(?:public|private|protected|internal|static|async|\s)+[\w<>\[\]]+\s+(\w+)\s*\([^)]*\)\s*\{?"
         )
         skip = {"if", "for", "while", "switch", "catch", "class"}
-        for lnum, line in enumerate(content.splitlines(), 1):
+        for lnum, line in enumerate(lines, 1):
             m = pat.search(line)
             if m and m.group(1) not in skip and "class " not in line:
                 mname = m.group(1)
@@ -1003,15 +1110,16 @@ class MethodGraphBuilder:
                 methods.append({
                     "id": mid, "name": mname, "full_name": mname,
                     "class_name": None, "file_path": str(fp),
-                    "line_number": lnum, "line_end": lnum,
+                    "line_number": lnum, "line_end": _find_body_end(lines, lnum - 1),
                     "signature": mname, "docstring": None, "service_id": service_id,
                 })
         return {"methods": methods, "calls": []}
 
     def _regex_rust(self, fp: Path, content: str, service_id: str) -> Dict:
         methods: List[Dict] = []
+        lines = content.splitlines()
         pat = re.compile(r"^\s*(?:pub\s+)?(?:async\s+)?fn\s+(\w+)\s*\(")
-        for lnum, line in enumerate(content.splitlines(), 1):
+        for lnum, line in enumerate(lines, 1):
             m = pat.match(line)
             if m:
                 mname = m.group(1)
@@ -1022,15 +1130,16 @@ class MethodGraphBuilder:
                 methods.append({
                     "id": mid, "name": mname, "full_name": mname,
                     "class_name": None, "file_path": str(fp),
-                    "line_number": lnum, "line_end": lnum,
+                    "line_number": lnum, "line_end": _find_body_end(lines, lnum - 1),
                     "signature": mname, "docstring": None, "service_id": service_id,
                 })
         return {"methods": methods, "calls": []}
 
     def _regex_ruby(self, fp: Path, content: str, service_id: str) -> Dict:
         methods: List[Dict] = []
+        lines = content.splitlines()
         pat = re.compile(r"^\s*def\s+(?:self\.)?(\w+)")
-        for lnum, line in enumerate(content.splitlines(), 1):
+        for lnum, line in enumerate(lines, 1):
             m = pat.match(line)
             if m:
                 mname = m.group(1)
@@ -1041,15 +1150,16 @@ class MethodGraphBuilder:
                 methods.append({
                     "id": mid, "name": mname, "full_name": mname,
                     "class_name": None, "file_path": str(fp),
-                    "line_number": lnum, "line_end": lnum,
+                    "line_number": lnum, "line_end": _find_ruby_body_end(lines, lnum - 1),
                     "signature": mname, "docstring": None, "service_id": service_id,
                 })
         return {"methods": methods, "calls": []}
 
     def _regex_php(self, fp: Path, content: str, service_id: str) -> Dict:
         methods: List[Dict] = []
+        lines = content.splitlines()
         pat = re.compile(r"^\s*(?:(?:public|private|protected|static|final)\s+)*function\s+(\w+)\s*\(")
-        for lnum, line in enumerate(content.splitlines(), 1):
+        for lnum, line in enumerate(lines, 1):
             m = pat.match(line)
             if m:
                 mname = m.group(1)
@@ -1060,10 +1170,81 @@ class MethodGraphBuilder:
                 methods.append({
                     "id": mid, "name": mname, "full_name": mname,
                     "class_name": None, "file_path": str(fp),
-                    "line_number": lnum, "line_end": lnum,
+                    "line_number": lnum, "line_end": _find_body_end(lines, lnum - 1),
                     "signature": mname, "docstring": None, "service_id": service_id,
                 })
         return {"methods": methods, "calls": []}
+
+    def _regex_cpp(self, fp: Path, content: str, service_id: str) -> Dict:
+        methods: List[Dict] = []
+        calls: List[Dict] = []
+        lines = content.splitlines()
+        current_class: Optional[str] = None
+
+        class_pat = re.compile(r"^\s*(?:class|struct)\s+(\w+)")
+        template_pat = re.compile(r"^\s*template\s*<[^>]*>\s*")
+        fn_pat = re.compile(
+            r"^\s*"
+            r"(?:(?:virtual|static|inline|explicit|constexpr|consteval|extern|friend)\s+)*"
+            r"(?:[\w:*&<>\[\],\s]+\s+)"
+            r"(?:([\w:]+)::)?(~?\w+)"
+            r"\s*\([^;]*\)"
+            r"\s*(?:const|volatile|noexcept|override|final|\[\[.*?\]\]|\s)*"
+            r"\s*\{?\s*$"
+        )
+        KEYWORDS = {
+            "if", "else", "for", "while", "switch", "catch", "try", "return",
+            "new", "delete", "sizeof", "typeof", "static_cast", "dynamic_cast",
+            "reinterpret_cast", "const_cast", "throw", "using", "namespace",
+            "typedef", "class", "struct", "enum", "union",
+            "public", "private", "protected", "do", "case", "default",
+        }
+        call_pat = re.compile(r"\b(\w+)\s*\(")
+
+        for lnum, line in enumerate(lines, 1):
+            cm = class_pat.match(line)
+            if cm:
+                current_class = cm.group(1)
+
+            match_line = line
+            if line.lstrip().startswith("template"):
+                match_line = template_pat.sub("", line, count=1)
+
+            m = fn_pat.match(match_line)
+            if m:
+                class_prefix = m.group(1)
+                mname = m.group(2)
+                if mname.lstrip("~") in KEYWORDS:
+                    continue
+                lower_name = mname.lower()
+                if lower_name.startswith("test") or "mock" in lower_name:
+                    continue
+                cls = class_prefix or current_class
+                full = f"{cls}.{mname}" if cls else mname
+                mid = self._make_method_id(service_id, fp, full)
+                body_end = _find_body_end(lines, lnum - 1)
+                methods.append({
+                    "id": mid, "name": mname, "full_name": full,
+                    "class_name": cls,
+                    "file_path": str(fp), "line_number": lnum, "line_end": body_end,
+                    "signature": mname, "docstring": None, "service_id": service_id,
+                })
+                body_end_idx = min(body_end, len(lines))
+                for body_lnum in range(lnum - 1, body_end_idx):
+                    body_line = lines[body_lnum]
+                    comment_pos = body_line.find("//")
+                    if comment_pos >= 0:
+                        body_line = body_line[:comment_pos]
+                    for call_m in call_pat.finditer(body_line):
+                        callee_name = call_m.group(1)
+                        if callee_name not in KEYWORDS:
+                            calls.append({
+                                "caller_id": mid, "callee_name": callee_name,
+                                "file_path": str(fp), "line_number": body_lnum + 1,
+                            })
+                continue
+
+        return {"methods": methods, "calls": calls}
 
     # ------------------------------------------------------------------ #
     # Call graph resolution                                                #

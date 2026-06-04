@@ -426,6 +426,8 @@ class ServiceGraphBuilder:
             if self._should_skip(fp):
                 continue
             rel = fp.relative_to(repo_path)
+            if any(part.startswith(".") for part in rel.parts[:-1]):
+                continue
             if gitignore_spec.match_file(str(rel).replace("\\", "/")):
                 continue
             if fp.name in manifests:

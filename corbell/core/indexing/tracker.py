@@ -169,6 +169,8 @@ class IndexTracker:
                 rel = fp.relative_to(repo_path)
                 if any(part in all_skip for part in rel.parts):
                     continue
+                if any(part.startswith(".") for part in rel.parts[:-1]):
+                    continue
                 # Check gitignore
                 if gitignore_spec.match_file(str(rel).replace("\\", "/")):
                     continue

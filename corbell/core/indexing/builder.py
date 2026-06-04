@@ -146,7 +146,10 @@ def _collect_repo_files(
     for fp in repo_path.rglob("*"):
         if not fp.is_file():
             continue
-        if any(part in SKIP_DIRS for part in fp.parts):
+        rel_path = fp.relative_to(repo_path)
+        if any(part in SKIP_DIRS for part in rel_path.parts):
+            continue
+        if any(part.startswith(".") for part in rel_path.parts[:-1]):
             continue
         lang = EXTENSION_LANG.get(fp.suffix)
         if not lang:
@@ -156,7 +159,7 @@ def _collect_repo_files(
                 continue
         except OSError:
             continue
-        rel = str(fp.relative_to(repo_path))
+        rel = str(rel_path)
         if gitignore_spec.match_file(rel.replace("\\", "/")):
             continue
         file_list.append((str(fp), rel, lang))

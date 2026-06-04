@@ -83,7 +83,10 @@ class CodeChunkExtractor:
             lang = _SUPPORTED.get(fp.suffix)
             if not lang:
                 continue
-            rel = str(fp.relative_to(repo_path))
+            rel_path = fp.relative_to(repo_path)
+            if any(part.startswith(".") for part in rel_path.parts[:-1]):
+                continue
+            rel = str(rel_path)
             if gitignore_spec.match_file(rel.replace("\\", "/")):
                 continue
             chunks = self._extract_file(fp, rel, lang, service_id, str(repo_path))

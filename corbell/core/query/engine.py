@@ -236,8 +236,23 @@ def _execute_pipeline(
     t0 = time.time()
     try:
         merged = merge_and_dedup(all_chunks)
-        # Apply top_k cap
-        merged = merged[:top_k]
+        # Apply top_k cap with reserved slots for pure-graph chunks.
+        # Pure-graph chunks have low scores (cascaded 0.6x/0.5x) and would
+        # be dropped by a naive score-based cap. Reserve up to 30% of slots.
+        if bonus_chunks and len(merged) > top_k:
+            graph_set = {c.chunk_id for c in bonus_chunks}
+            graph_only = [c for c in merged if all(
+                p in graph_set for p in c.chunk_id.split('+')
+            )]
+            the_rest = [c for c in merged if not all(
+                p in graph_set for p in c.chunk_id.split('+')
+            )]
+            graph_budget = min(len(graph_only), top_k * 3 // 10)
+            rest_budget = top_k - graph_budget
+            merged = the_rest[:rest_budget] + graph_only[:graph_budget]
+            merged.sort(key=lambda c: c.score, reverse=True)
+        else:
+            merged = merged[:top_k]
     finally:
         diagnostics.record_time("merge_dedup", time.time() - t0)
 
