@@ -71,7 +71,6 @@ def context_engine_codebase_retrieval(
                 "Run 'corbell index build --rebuild' to recreate."
             )
 
-        # Check index status
         try:
             chunk_count = emb_store.count()
         except Exception:
@@ -88,7 +87,6 @@ def context_engine_codebase_retrieval(
             builder = IndexBuilder()
             builder.build(cfg, db_path, rebuild=True)
 
-        # Blocking incremental rebuild if stale (MCP never does full build)
         tracker = IndexTracker(db_path)
         stale_result = tracker.get_stale_files(cfg.repos, cfg)
         if stale_result.has_changes:
@@ -96,21 +94,17 @@ def context_engine_codebase_retrieval(
                 builder = IndexBuilder()
                 builder.build(cfg, db_path, rebuild=False)
             except Exception:
-                # Non-fatal: proceed with current index
                 pass
 
-        # Run the retrieval pipeline
         from corbell.core.query.engine import codebase_retrieval
 
-        result = codebase_retrieval(
+        return codebase_retrieval(
             query=query,
             workspace_path=ws_path,
             top_k=50,
             use_llm=True,
             rerank=True,
         )
-
-        return result
 
     except Exception as exc:
         return f"Error: Unexpected failure in codebase_retrieval: {exc}"

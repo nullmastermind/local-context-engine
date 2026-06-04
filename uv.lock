@@ -583,9 +583,10 @@ wheels = [
 
 [[package]]
 name = "codebase-retrieval-context-engine"
-version = "2.0.3"
+version = "2.0.4"
 source = { editable = "." }
 dependencies = [
+    { name = "google-genai" },
     { name = "mcp" },
     { name = "numpy" },
     { name = "pathspec" },
@@ -593,6 +594,7 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "rich" },
     { name = "typer" },
+    { name = "voyageai" },
 ]
 
 [package.optional-dependencies]
@@ -621,9 +623,6 @@ gcp = [
     { name = "anthropic", extra = ["vertex"] },
     { name = "google-cloud-aiplatform" },
 ]
-google = [
-    { name = "google-genai" },
-]
 openai = [
     { name = "openai" },
 ]
@@ -639,9 +638,6 @@ treesitter = [
     { name = "tree-sitter-rust" },
     { name = "tree-sitter-typescript" },
 ]
-voyage = [
-    { name = "voyageai" },
-]
 
 [package.metadata]
 requires-dist = [
@@ -649,7 +645,7 @@ requires-dist = [
     { name = "anthropic", extras = ["vertex"], marker = "extra == 'gcp'", specifier = ">=0.25" },
     { name = "boto3", marker = "extra == 'aws'", specifier = ">=1.34" },
     { name = "google-cloud-aiplatform", marker = "extra == 'gcp'", specifier = ">=1.38" },
-    { name = "google-genai", marker = "extra == 'google'", specifier = ">=2.7.0" },
+    { name = "google-genai", specifier = ">=2.7.0" },
     { name = "gradio", marker = "extra == 'debug'", specifier = ">=4.0" },
     { name = "httpx", marker = "extra == 'dev'" },
     { name = "mcp", specifier = ">=1.1.2" },
@@ -677,9 +673,9 @@ requires-dist = [
     { name = "tree-sitter-rust", marker = "extra == 'treesitter'", specifier = ">=0.21" },
     { name = "tree-sitter-typescript", marker = "extra == 'treesitter'", specifier = ">=0.21" },
     { name = "typer", specifier = ">=0.12" },
-    { name = "voyageai", marker = "extra == 'voyage'", specifier = ">=0.3" },
+    { name = "voyageai", specifier = ">=0.3" },
 ]
-provides-extras = ["openai", "anthropic", "google", "voyage", "aws", "azure", "gcp", "treesitter", "dev", "debug"]
+provides-extras = ["openai", "anthropic", "aws", "azure", "gcp", "treesitter", "dev", "debug"]
 
 [[package]]
 name = "colorama"
