@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -75,10 +76,60 @@ _API_BATCH_SIZE = 100  # conservative limit for API-backed embedding models
 # Super-batch size: number of chunks streamed to the embedding store at a time.
 # Keeps peak memory bounded regardless of total corpus size.
 # Override via CORBELL_EMBED_BATCH env var.
-_SUPER_BATCH_SIZE: int = max(1, int(os.environ.get("CORBELL_EMBED_BATCH", "500") or "500"))
+_SUPER_BATCH_SIZE: int = max(1, int(os.environ.get("CORBELL_EMBED_BATCH", "6000") or "6000"))
 
 _ENCODE_MAX_RETRIES = 3
 _ENCODE_BASE_DELAY = 2.0
+
+# --------------------------------------------------------------------------- #
+# Profiling counters (thread-safe)                                             #
+# --------------------------------------------------------------------------- #
+
+_perf_lock = threading.Lock()
+_perf_stats: Dict[str, Any] = {}
+
+
+def _perf_reset() -> None:
+    """Reset profiling counters for a fresh build run."""
+    global _perf_stats
+    with _perf_lock:
+        _perf_stats = {
+            "api_calls": 0,
+            "api_total_latency": 0.0,
+            "api_min_latency": float("inf"),
+            "api_max_latency": 0.0,
+            "api_total_texts": 0,
+            "api_retries": 0,
+        }
+
+
+def _perf_record_api_call(latency: float, batch_size: int, retried: bool = False) -> None:
+    """Record a single embedding API call's metrics."""
+    with _perf_lock:
+        _perf_stats["api_calls"] += 1
+        _perf_stats["api_total_latency"] += latency
+        _perf_stats["api_min_latency"] = min(_perf_stats["api_min_latency"], latency)
+        _perf_stats["api_max_latency"] = max(_perf_stats["api_max_latency"], latency)
+        _perf_stats["api_total_texts"] += batch_size
+        if retried:
+            _perf_stats["api_retries"] += 1
+
+
+def _perf_summary() -> Dict[str, Any]:
+    """Return a snapshot of current profiling counters."""
+    with _perf_lock:
+        s = dict(_perf_stats)
+    if s.get("api_calls", 0) > 0:
+        s["api_avg_latency"] = s["api_total_latency"] / s["api_calls"]
+        s["api_throughput_texts_per_sec"] = (
+            s["api_total_texts"] / s["api_total_latency"] if s["api_total_latency"] > 0 else 0
+        )
+    else:
+        s["api_avg_latency"] = 0
+        s["api_throughput_texts_per_sec"] = 0
+    if s.get("api_min_latency") == float("inf"):
+        s["api_min_latency"] = 0
+    return s
 
 
 def _encode_batch_with_retry(model: Any, batch: List[str]) -> List[Any]:
@@ -89,9 +140,14 @@ def _encode_batch_with_retry(model: Any, batch: List[str]) -> List[Any]:
     connection resets, 5xx) and retries up to ``_ENCODE_MAX_RETRIES`` times with
     exponential backoff before propagating.
     """
+    retried = False
     for attempt in range(_ENCODE_MAX_RETRIES):
         try:
-            return model.encode(batch)
+            t0 = time.perf_counter()
+            result = model.encode(batch)
+            latency = time.perf_counter() - t0
+            _perf_record_api_call(latency, len(batch), retried=retried)
+            return result
         except Exception as e:
             status = getattr(e, "status_code", None) or getattr(e, "code", None)
             is_transient = (
@@ -100,6 +156,7 @@ def _encode_batch_with_retry(model: Any, batch: List[str]) -> List[Any]:
             )
             if not is_transient or attempt == _ENCODE_MAX_RETRIES - 1:
                 raise
+            retried = True
             delay = _ENCODE_BASE_DELAY * (2 ** attempt)
             logger.warning(
                 "Transient embedding error (attempt %d/%d): %s. Retrying in %.0fs...",
@@ -160,6 +217,8 @@ def _encode_chunks(model: Any, chunks: List[Any]) -> List[Any]:
     if not chunks:
         return chunks
 
+    t_prep = time.perf_counter()
+
     if isinstance(model, GoogleEmbeddingModel) and model.uses_prefix_format:
         texts = [
             model.prepare_document(
@@ -175,13 +234,23 @@ def _encode_chunks(model: Any, chunks: List[Any]) -> List[Any]:
     else:
         texts = [c.content for c in chunks]
 
+    t_prep_done = time.perf_counter()
+
     # Split texts into API-sized batches and encode concurrently.
     batches = [texts[i : i + _API_BATCH_SIZE] for i in range(0, len(texts), _API_BATCH_SIZE)]
     concurrency = _get_embed_concurrency(model)
 
+    logger.info(
+        "[PERF] _encode_chunks: %d chunks → %d batches (batch_size=%d, concurrency=%d, "
+        "text_prep=%.3fs)",
+        len(chunks), len(batches), _API_BATCH_SIZE, concurrency,
+        t_prep_done - t_prep,
+    )
+
     # Use a list pre-sized to the number of batches so we can store results in order.
     batch_vectors: List[Any] = [None] * len(batches)
 
+    t_embed_start = time.perf_counter()
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         future_to_idx = {
             executor.submit(_encode_batch_with_retry, model, batch): idx
@@ -190,6 +259,7 @@ def _encode_chunks(model: Any, chunks: List[Any]) -> List[Any]:
         for future in as_completed(future_to_idx):
             idx = future_to_idx[future]
             batch_vectors[idx] = future.result()
+    t_embed_done = time.perf_counter()
 
     # Flatten ordered results and assign to chunks.
     vectors: List[Any] = []
@@ -198,6 +268,14 @@ def _encode_chunks(model: Any, chunks: List[Any]) -> List[Any]:
 
     for chunk, vec in zip(chunks, vectors):
         chunk.embedding = vec
+
+    embed_wall = t_embed_done - t_embed_start
+    throughput = len(chunks) / embed_wall if embed_wall > 0 else 0
+    logger.info(
+        "[PERF] _encode_chunks done: wall=%.3fs, throughput=%.1f chunks/s, "
+        "%.1f texts/s across %d batches",
+        embed_wall, throughput, throughput, len(batches),
+    )
 
     return chunks
 
@@ -388,6 +466,9 @@ class IndexBuilder:
         progress_fn: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, Any]:
         """Inner full build — called while holding IndexLock."""
+        t_build_start = time.perf_counter()
+        _perf_reset()
+
         # C2: Skip if another process already completed a build very recently.
         last_build = tracker.get_last_build_at()
         if last_build is not None and (time.time() - last_build) < 30:
@@ -407,7 +488,7 @@ class IndexBuilder:
         total_repos = 0
         services_data = []
         workers = _get_worker_count()
-        repo_file_lists: Dict[str, List[Path]] = {}  # repo_path str -> list of Path objects
+        repo_file_lists: Dict[str, List[Path]] = {}
 
         for repo in repos:
             repo_id = repo.id
@@ -427,12 +508,17 @@ class IndexBuilder:
 
             gitignore_spec = load_gitignore(repo_path)
 
-            # Collect file list for parallel dispatch
+            # -- Stage: file collection --
+            t_collect = time.perf_counter()
             file_list = _collect_repo_files(
                 repo_path, repo_id, indexing.max_file_bytes, gitignore_spec
             )
+            t_collect_done = time.perf_counter()
+            logger.info(
+                "[PERF] %s: file collection: %d files in %.3fs",
+                repo_id, len(file_list), t_collect_done - t_collect,
+            )
 
-            # Store Path objects for graph builders (reuse same walk)
             repo_file_lists[str(repo_path)] = [Path(abs_path) for abs_path, rel, lang in file_list]
 
             if not file_list:
@@ -444,7 +530,6 @@ class IndexBuilder:
                     f"Extracting {repo_id} ({len(file_list)} files, {workers} workers)..."
                 )
 
-            # Build worker args (all strings — picklable)
             worker_args = [
                 (
                     abs_path_str,
@@ -459,7 +544,8 @@ class IndexBuilder:
                 for abs_path_str, rel_path, lang in file_list
             ]
 
-            # Parallel extraction
+            # -- Stage: parallel extraction --
+            t_extract = time.perf_counter()
             chunks: List[Any] = []
             with ProcessPoolExecutor(max_workers=workers) as pool:
                 futures = {pool.submit(_extract_file_worker, arg): arg for arg in worker_args}
@@ -469,39 +555,66 @@ class IndexBuilder:
                     except Exception as exc:
                         file_info = futures[future]
                         logger.warning("Failed to extract %s: %s", file_info[0], exc)
+            t_extract_done = time.perf_counter()
+            logger.info(
+                "[PERF] %s: chunk extraction: %d chunks from %d files in %.3fs "
+                "(%d workers, %.1f files/s)",
+                repo_id, len(chunks), len(file_list),
+                t_extract_done - t_extract, workers,
+                len(file_list) / (t_extract_done - t_extract) if (t_extract_done - t_extract) > 0 else 0,
+            )
 
             if progress_fn:
                 progress_fn(f"Indexing {repo_id} ({len(chunks)} chunks)...")
 
             if chunks:
-                # Stream in super-batches: encode + commit one bounded slice at a time.
-                # Committing per super-batch keeps SQLite WAL bounded (not corpus-sized).
-                # CRASH-SAFE: mark_indexed is called AFTER all super-batches are committed,
-                # so partial commits from a crash are cleaned up via delete_by_file on restart.
+                # -- Stage: embedding + SQLite write (streaming super-batches) --
+                t_embed_total = time.perf_counter()
+                sb_count = 0
                 with emb_store.connection() as conn:
                     for i in range(0, len(chunks), _SUPER_BATCH_SIZE):
                         super_batch = chunks[i : i + _SUPER_BATCH_SIZE]
+                        t_sb = time.perf_counter()
                         _encode_chunks(model, super_batch)
+                        t_sb_encoded = time.perf_counter()
                         emb_store.upsert_batch(super_batch, conn=conn)
                         conn.commit()
+                        t_sb_committed = time.perf_counter()
+                        sb_count += 1
+                        logger.info(
+                            "[PERF] %s: super-batch %d/%d (%d chunks): "
+                            "embed=%.3fs, sqlite_write=%.3fs",
+                            repo_id, sb_count,
+                            (len(chunks) + _SUPER_BATCH_SIZE - 1) // _SUPER_BATCH_SIZE,
+                            len(super_batch),
+                            t_sb_encoded - t_sb,
+                            t_sb_committed - t_sb_encoded,
+                        )
+                t_embed_total_done = time.perf_counter()
+                logger.info(
+                    "[PERF] %s: total embed+write: %.3fs for %d chunks "
+                    "(%d super-batches of %d)",
+                    repo_id, t_embed_total_done - t_embed_total,
+                    len(chunks), sb_count, _SUPER_BATCH_SIZE,
+                )
                 total_chunks += len(chunks)
 
-                # Mark each file as indexed AFTER chunks are committed
                 file_mtimes = self._collect_file_mtimes(repo_path, chunks)
                 for file_path, mtime in file_mtimes.items():
                     tracker.mark_indexed(file_path, repo_id, mtime)
 
             total_repos += 1
 
-        # Build graph
+        # -- Stage: graph build --
         from corbell.core.graph.builder import ServiceGraphBuilder
         from corbell.core.graph.method_graph import MethodGraphBuilder, _EXT_LANG as _GRAPH_EXT_LANG
         if progress_fn:
             progress_fn("Building call graph...")
+
+        t_graph = time.perf_counter()
         sgb = ServiceGraphBuilder(graph_store)
         mgb = MethodGraphBuilder(graph_store)
 
-        # Collect all indexed files across repos for ServiceGraphBuilder
         all_indexed_files: List[Path] = []
         for file_paths in repo_file_lists.values():
             all_indexed_files.extend(file_paths)
@@ -515,12 +628,33 @@ class IndexBuilder:
             all_files = repo_file_lists.get(repo_path_str, [])
             graph_file_list = [fp for fp in all_files if fp.suffix in _GRAPH_EXT_LANG]
             mgb.build_for_service(svc["id"], svc["resolved_path"], file_list=graph_file_list)
+        t_graph_done = time.perf_counter()
+        logger.info(
+            "[PERF] graph build: %.3fs (%d files across %d repos)",
+            t_graph_done - t_graph, len(all_indexed_files), len(services_data),
+        )
 
         # Store global metadata LAST (after all commits)
         tracker.set_meta("embedding_model", model_name)
         tracker.set_meta("last_build_at", str(time.time()))
         tracker.set_meta("chunk_size", str(indexing.chunk_size))
         tracker.set_meta("overlap", str(indexing.chunk_overlap))
+
+        # -- Final profiling summary --
+        t_build_done = time.perf_counter()
+        perf = _perf_summary()
+        logger.info(
+            "[PERF] === BUILD COMPLETE === total=%.3fs | chunks=%d | repos=%d",
+            t_build_done - t_build_start, total_chunks, total_repos,
+        )
+        logger.info(
+            "[PERF] API summary: calls=%d, total_latency=%.3fs, avg=%.3fs, "
+            "min=%.3fs, max=%.3fs, texts=%d, throughput=%.1f texts/s, retries=%d",
+            perf["api_calls"], perf["api_total_latency"], perf["api_avg_latency"],
+            perf["api_min_latency"], perf["api_max_latency"],
+            perf["api_total_texts"], perf["api_throughput_texts_per_sec"],
+            perf["api_retries"],
+        )
 
         return {
             "status": "full_build",

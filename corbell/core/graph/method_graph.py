@@ -437,8 +437,6 @@ class MethodGraphBuilder:
             for fp in Path(repo_path).rglob("*"):
                 if not fp.is_file():
                     continue
-                # Only skip if the immediate parent directory name is in SKIP_DIRS
-                # (avoids false-positives from matching path segments like 'corbel')
                 rel = fp.relative_to(repo_path)
                 if any(part in _SKIP_DIRS for part in rel.parts):
                     continue

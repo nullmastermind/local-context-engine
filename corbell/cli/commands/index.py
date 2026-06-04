@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Optional
@@ -26,6 +27,9 @@ def build(
     repo: Optional[str] = typer.Option(
         None, "--repo", help="Only index a specific repo by ID."
     ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Enable detailed performance logging."
+    ),
 ) -> None:
     """Build (or incrementally update) the code search index.
 
@@ -39,6 +43,15 @@ def build(
     2. CORBELL_WORKSPACE environment variable
     3. Current working directory
     """
+    if verbose or os.environ.get("CORBELL_VERBOSE", ""):
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(name)s %(message)s",
+            datefmt="%H:%M:%S",
+        )
+    else:
+        logging.basicConfig(level=logging.WARNING)
+
     from corbell.core.workspace import build_config, db_path_for_workspace
 
     # Resolve workspace path: flag → env var → cwd
