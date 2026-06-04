@@ -373,6 +373,7 @@ def build_config(workspace_path: Path) -> WorkspaceConfig:
     skip_dirs_str = os.environ.get("CORBELL_SKIP_DIRS", "")
     skip_dirs = [d.strip() for d in skip_dirs_str.split(",") if d.strip()] if skip_dirs_str else []
     llm_model = os.environ.get("CORBELL_LLM_MODEL", "claude-sonnet-4-5")
+    llm_provider = os.environ.get("CORBELL_LLM_PROVIDER", "anthropic")
 
     # Single repo: workspace root IS the repo
     repo_id = workspace_path.name
@@ -399,5 +400,5 @@ def build_config(workspace_path: Path) -> WorkspaceConfig:
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
         ),
-        llm=LLMConfig(model=llm_model),
+        llm=LLMConfig(provider=llm_provider, model=llm_model),
     )

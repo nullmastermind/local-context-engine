@@ -99,14 +99,14 @@ def debug(
 
         # --- Rerank prompts ---
         detail = result.rerank_detail
-        if detail is None:
+        if detail is None or not detail.system_prompt:
             rerank_system = "_LLM not configured — reranking skipped_"
             rerank_user = ""
             rerank_response = ""
         else:
-            rerank_system = detail.system_prompt or ""
-            rerank_user = detail.user_prompt or ""
-            rerank_response = detail.raw_response or ""
+            rerank_system = detail.system_prompt
+            rerank_user = detail.user_prompt
+            rerank_response = detail.raw_response or "_No response (LLM call failed)_"
 
         return (
             error_text,
