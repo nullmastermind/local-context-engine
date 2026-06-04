@@ -16,6 +16,18 @@ claude mcp add-json codebase-retrieval --scope user '{"type":"stdio","command":"
 
 That's it. The AI agent passes workspace path and triggers index builds automatically.
 
+## Update
+
+```bash
+uv tool upgrade codebase-retrieval-context-engine
+```
+
+Or if installed via `uvx` (auto-managed):
+
+```bash
+uvx --upgrade codebase-retrieval-context-engine
+```
+
 ## Remove from Claude Code
 
 ```bash
