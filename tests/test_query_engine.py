@@ -30,7 +30,7 @@ def workspace_with_indexed_repo(tmp_path, monkeypatch):
         "CORBELL_SKIP_DIRS", "CORBELL_LLM_MODEL",
     ):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("CORBELL_EMBEDDING_MODEL", "test-model")
+    monkeypatch.setenv("CORBELL_EMBEDDING_MODEL", "voyage-test")
 
     workspace = tmp_path / "my-repo"
     workspace.mkdir()
@@ -112,7 +112,7 @@ def test_codebase_retrieval_returns_formatted_output(workspace_with_indexed_repo
     mock_model = MagicMock()
     mock_model.encode.return_value = [query_vec]
 
-    with patch("corbell.core.query.engine.SentenceTransformerModel", return_value=mock_model):
+    with patch("corbell.core.query.engine.VoyageEmbeddingModel", return_value=mock_model):
         from corbell.core.query.engine import codebase_retrieval
         result = codebase_retrieval(
             query="authentication",
@@ -165,7 +165,7 @@ def test_codebase_retrieval_no_llm(workspace_with_indexed_repo):
     q = rng.randn(384).astype(np.float32)
     mock_model.encode.return_value = [(q / np.linalg.norm(q)).tolist()]
 
-    with patch("corbell.core.query.engine.SentenceTransformerModel", return_value=mock_model):
+    with patch("corbell.core.query.engine.VoyageEmbeddingModel", return_value=mock_model):
         from corbell.core.query.engine import codebase_retrieval
         result = codebase_retrieval(str(workspace), workspace, use_llm=False, rerank=False)
 

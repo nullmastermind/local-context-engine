@@ -76,9 +76,7 @@ _API_BATCH_SIZE = 100  # conservative limit for API-backed embedding models
 def _encode_chunks(model: Any, chunks: List[Any]) -> List[Any]:
     """Encode chunks and attach embeddings in-place.
 
-    SentenceTransformerModel handles its own internal batching efficiently —
-    we pass the full list.  For API-backed models (Google, Voyage) we batch
-    into groups of ``_API_BATCH_SIZE`` to stay within rate limits.
+    Batches into groups of ``_API_BATCH_SIZE`` to stay within rate limits.
 
     Args:
         model: An EmbeddingModel instance.
@@ -87,7 +85,7 @@ def _encode_chunks(model: Any, chunks: List[Any]) -> List[Any]:
     Returns:
         The same list with ``embedding`` fields populated.
     """
-    from corbell.core.embeddings.model import GoogleEmbeddingModel, VoyageEmbeddingModel
+    from corbell.core.embeddings.model import GoogleEmbeddingModel
 
     if not chunks:
         return chunks
@@ -107,15 +105,10 @@ def _encode_chunks(model: Any, chunks: List[Any]) -> List[Any]:
     else:
         texts = [c.content for c in chunks]
 
-    is_api_model = isinstance(model, (GoogleEmbeddingModel, VoyageEmbeddingModel))
-
-    if is_api_model:
-        vectors: List[Any] = []
-        for i in range(0, len(texts), _API_BATCH_SIZE):
-            batch_texts = texts[i : i + _API_BATCH_SIZE]
-            vectors.extend(model.encode(batch_texts))
-    else:
-        vectors = model.encode(texts)
+    vectors: List[Any] = []
+    for i in range(0, len(texts), _API_BATCH_SIZE):
+        batch_texts = texts[i : i + _API_BATCH_SIZE]
+        vectors.extend(model.encode(batch_texts))
 
     for chunk, vec in zip(chunks, vectors):
         chunk.embedding = vec
@@ -206,7 +199,7 @@ class IndexBuilder:
         """
         from corbell.core.embeddings.extractor import CodeChunkExtractor
         from corbell.core.embeddings.model import (
-            SentenceTransformerModel, GoogleEmbeddingModel, VoyageEmbeddingModel, EmbeddingModel,
+            GoogleEmbeddingModel, VoyageEmbeddingModel, EmbeddingModel,
         )
         from corbell.core.embeddings.sqlite_store import SQLiteEmbeddingStore
         from corbell.core.graph.sqlite_store import SQLiteGraphStore
@@ -244,7 +237,12 @@ class IndexBuilder:
         elif model_name.startswith("voyage-"):
             model = VoyageEmbeddingModel(model_name)
         else:
-            model = SentenceTransformerModel(model_name)
+            raise ValueError(
+                f"Unsupported embedding model '{model_name}'. "
+                f"Set CORBELL_EMBEDDING_MODEL to a cloud model:\n"
+                f"  - voyage-code-3 or voyage-4-lite (requires VOYAGE_API_KEY)\n"
+                f"  - gemini-embedding-001 (requires GOOGLE_API_KEY)"
+            )
 
         if rebuild:
             return self._full_build(

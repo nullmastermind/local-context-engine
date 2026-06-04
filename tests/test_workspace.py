@@ -294,10 +294,10 @@ def test_llm_resolved_api_key_google(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_resolve_embedding_dimension_defaults():
-    """Known models return their expected dimensions."""
-    assert resolve_embedding_dimension("all-MiniLM-L6-v2") == 384
-    assert resolve_embedding_dimension("all-MiniLM-L12-v2") == 384
-    assert resolve_embedding_dimension("all-mpnet-base-v2") == 768
+    """Cloud models return their expected dimensions."""
+    assert resolve_embedding_dimension("voyage-code-3") == 1024
+    assert resolve_embedding_dimension("voyage-4-lite") == 1024
+    assert resolve_embedding_dimension("gemini-embedding-001") == 768
 
 
 def test_resolve_embedding_dimension_voyage():
@@ -312,14 +312,14 @@ def test_resolve_embedding_dimension_gemini():
 
 
 def test_resolve_embedding_dimension_unknown_fallback():
-    """Unknown model names fall back to 384."""
-    assert resolve_embedding_dimension("some-unknown-model") == 384
+    """Unknown model names fall back to 1024 (Voyage default)."""
+    assert resolve_embedding_dimension("some-unknown-model") == 1024
 
 
 def test_resolve_embedding_dimension_env_override(monkeypatch):
     """CORBELL_EMBEDDING_DIM env var overrides the lookup."""
     monkeypatch.setenv("CORBELL_EMBEDDING_DIM", "512")
-    assert resolve_embedding_dimension("all-MiniLM-L6-v2") == 512
+    assert resolve_embedding_dimension("voyage-code-3") == 512
 
 
 # ---------------------------------------------------------------------------

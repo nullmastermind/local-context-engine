@@ -26,7 +26,7 @@ class RepoConfig(BaseModel):
 class StorageConfig(BaseModel):
     """Storage sub-config (single SQLite file for both graph and embeddings)."""
 
-    model: str = "all-MiniLM-L6-v2"
+    model: str = "voyage-code-3"
 
     model_config = {"extra": "ignore"}
 
@@ -197,12 +197,7 @@ def resolve_embedding_dimension(model_name: str) -> int:
         return 1024
     if model_name.startswith("gemini-"):
         return 768
-    known_dims = {
-        "all-MiniLM-L6-v2": 384,
-        "all-MiniLM-L12-v2": 384,
-        "all-mpnet-base-v2": 768,
-    }
-    return known_dims.get(model_name, 384)
+    return 1024
 
 
 def detect_git_branch(workspace_path: Path) -> str:
@@ -308,9 +303,9 @@ def db_path_for_workspace(workspace_path: Path, model: Optional[str] = None) -> 
     Args:
         workspace_path: Path to the workspace root directory.
         model: Embedding model name.  Falls back to ``CORBELL_EMBEDDING_MODEL``
-               env var, then ``"all-MiniLM-L6-v2"``.
+               env var, then ``"voyage-code-3"``.
     """
-    model_name = model or os.environ.get("CORBELL_EMBEDDING_MODEL") or "all-MiniLM-L6-v2"
+    model_name = model or os.environ.get("CORBELL_EMBEDDING_MODEL") or "voyage-code-3"
     dimension = resolve_embedding_dimension(model_name)
     branch = detect_git_branch(workspace_path)
 
@@ -373,7 +368,7 @@ def build_config(workspace_path: Path) -> WorkspaceConfig:
     expand_max_chunks = int(os.environ.get("CORBELL_EXPAND_MAX_CHUNKS", "30"))
     rerank_str = os.environ.get("CORBELL_RERANK", "true").lower()
     rerank = rerank_str not in ("false", "0", "no")
-    embedding_model = os.environ.get("CORBELL_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+    embedding_model = os.environ.get("CORBELL_EMBEDDING_MODEL", "voyage-code-3")
     max_file_bytes = int(os.environ.get("CORBELL_MAX_FILE_BYTES", str(1024 * 1024)))
     skip_dirs_str = os.environ.get("CORBELL_SKIP_DIRS", "")
     skip_dirs = [d.strip() for d in skip_dirs_str.split(",") if d.strip()] if skip_dirs_str else []

@@ -1,4 +1,4 @@
-"""Embedding model interface + SentenceTransformers implementation."""
+"""Embedding model interface + cloud provider implementations (Google, Voyage)."""
 
 from __future__ import annotations
 
@@ -31,32 +31,6 @@ class EmbeddingModel(ABC):
     def dimension(self) -> int:
         """Return the embedding dimension."""
         ...
-
-
-class SentenceTransformerModel(EmbeddingModel):
-    """Wraps ``sentence-transformers`` with lazy loading.
-
-    Uses ``all-MiniLM-L6-v2`` by default (384-dim, fast, no API key).
-    """
-
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        self.model_name = model_name
-        self._model = None  # lazy-loaded
-
-    def _get_model(self):
-        if self._model is None:
-            from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(f"sentence-transformers/{self.model_name}")
-        return self._model
-
-    def encode(self, texts: List[str]) -> List[List[float]]:
-        model = self._get_model()
-        vecs = model.encode(texts, show_progress_bar=False)
-        return [v.tolist() for v in vecs]
-
-    @property
-    def dimension(self) -> int:
-        return self._get_model().get_sentence_embedding_dimension()
 
 
 def _is_voyage_rate_limit_error(e: Exception) -> bool:
@@ -130,9 +104,8 @@ class GoogleEmbeddingModel(EmbeddingModel):
         if not self._api_keys:
             raise ValueError(
                 "GOOGLE_API_KEY is not set. "
-                "Set it in your environment or workspace.yaml:\n"
-                "  export GOOGLE_API_KEY=AIza...\n"
-                "Or use a local embedding model (e.g. all-MiniLM-L6-v2) in storage.model."
+                "Set it in your environment or .env file:\n"
+                "  export GOOGLE_API_KEY=AIza..."
             )
         self._key_index: int = random.randrange(len(self._api_keys))
         # kept for backwards-compat with tests that read _api_key directly
@@ -302,9 +275,8 @@ class VoyageEmbeddingModel(EmbeddingModel):
         if not self._api_keys:
             raise ValueError(
                 "VOYAGE_API_KEY is not set. "
-                "Set it in your environment or workspace.yaml:\n"
-                "  export VOYAGE_API_KEY=pa-...\n"
-                "Or use a local embedding model (e.g. all-MiniLM-L6-v2) in storage.model."
+                "Set it in your environment or .env file:\n"
+                "  export VOYAGE_API_KEY=pa-..."
             )
         self._key_index: int = random.randrange(len(self._api_keys))
         # kept for backwards-compat with tests that read _api_key directly

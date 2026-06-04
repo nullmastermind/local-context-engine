@@ -32,7 +32,7 @@ def repo(tmp_path) -> Path:
 
 @pytest.fixture
 def workspace_config(repo, monkeypatch, tmp_path):
-    """Build a WorkspaceConfig for the test repo, with embedding model set to 'test-model'."""
+    """Build a WorkspaceConfig for the test repo, with embedding model set to 'voyage-test'."""
     # Clear CORBELL_* env vars to get clean defaults
     for var in (
         "CORBELL_TOP_K", "CORBELL_CHUNK_SIZE", "CORBELL_CHUNK_OVERLAP",
@@ -42,7 +42,7 @@ def workspace_config(repo, monkeypatch, tmp_path):
     ):
         monkeypatch.delenv(var, raising=False)
 
-    monkeypatch.setenv("CORBELL_EMBEDDING_MODEL", "test-model")
+    monkeypatch.setenv("CORBELL_EMBEDDING_MODEL", "voyage-test")
     monkeypatch.setenv("CORBELL_TOP_K", "10")
 
     from corbell.core.workspace import build_config
@@ -75,7 +75,7 @@ def test_full_build_indexes_all_files(workspace_config, db_path):
     """Full build indexes all files in the repo."""
     mock_model = _make_mock_model()
 
-    with patch("corbell.core.indexing.builder.SentenceTransformerModel", return_value=mock_model):
+    with patch("corbell.core.indexing.builder.VoyageEmbeddingModel", return_value=mock_model):
         builder = IndexBuilder()
         result = builder.build(workspace_config, db_path, rebuild=True)
 
@@ -92,7 +92,7 @@ def test_full_build_stores_metadata(workspace_config, db_path):
     mock_model = _make_mock_model()
 
     before = time.time()
-    with patch("corbell.core.indexing.builder.SentenceTransformerModel", return_value=mock_model):
+    with patch("corbell.core.indexing.builder.VoyageEmbeddingModel", return_value=mock_model):
         builder = IndexBuilder()
         builder.build(workspace_config, db_path, rebuild=True)
 
@@ -100,7 +100,7 @@ def test_full_build_stores_metadata(workspace_config, db_path):
     stored_model = tracker.get_stored_model()
     last_build = tracker.get_last_build_at()
 
-    assert stored_model == "test-model"
+    assert stored_model == "voyage-test"
     assert last_build is not None
     assert last_build >= before
 
@@ -114,7 +114,7 @@ def test_incremental_only_reindexes_changed_files(workspace_config, db_path, rep
     mock_model = _make_mock_model()
 
     # First: full build
-    with patch("corbell.core.indexing.builder.SentenceTransformerModel", return_value=mock_model):
+    with patch("corbell.core.indexing.builder.VoyageEmbeddingModel", return_value=mock_model):
         builder = IndexBuilder()
         builder.build(workspace_config, db_path, rebuild=True)
 
@@ -129,7 +129,7 @@ def test_incremental_only_reindexes_changed_files(workspace_config, db_path, rep
     """))
 
     # Second: incremental
-    with patch("corbell.core.indexing.builder.SentenceTransformerModel", return_value=mock_model):
+    with patch("corbell.core.indexing.builder.VoyageEmbeddingModel", return_value=mock_model):
         builder2 = IndexBuilder()
         result = builder2.build(workspace_config, db_path, rebuild=False)
 
@@ -144,7 +144,7 @@ def test_incremental_detects_deleted_files(workspace_config, db_path, repo):
     mock_model = _make_mock_model()
 
     # Full build first
-    with patch("corbell.core.indexing.builder.SentenceTransformerModel", return_value=mock_model):
+    with patch("corbell.core.indexing.builder.VoyageEmbeddingModel", return_value=mock_model):
         builder = IndexBuilder()
         builder.build(workspace_config, db_path, rebuild=True)
 
@@ -154,7 +154,7 @@ def test_incremental_detects_deleted_files(workspace_config, db_path, repo):
     (repo / "module_b.py").unlink()
 
     # Incremental rebuild
-    with patch("corbell.core.indexing.builder.SentenceTransformerModel", return_value=mock_model):
+    with patch("corbell.core.indexing.builder.VoyageEmbeddingModel", return_value=mock_model):
         builder2 = IndexBuilder()
         result = builder2.build(workspace_config, db_path, rebuild=False)
 
@@ -171,16 +171,16 @@ def test_model_mismatch_raises_error(workspace_config, db_path, monkeypatch):
     """Incremental build fails if the stored model doesn't match the current config."""
     mock_model = _make_mock_model()
 
-    # Full build with "test-model"
-    with patch("corbell.core.indexing.builder.SentenceTransformerModel", return_value=mock_model):
+    # Full build with "voyage-test"
+    with patch("corbell.core.indexing.builder.VoyageEmbeddingModel", return_value=mock_model):
         builder = IndexBuilder()
         builder.build(workspace_config, db_path, rebuild=True)
 
     # Simulate config change to different model
-    workspace_config.storage.model = "different-model"
+    workspace_config.storage.model = "voyage-different"
 
     with pytest.raises(ValueError, match="Model changed"):
-        with patch("corbell.core.indexing.builder.SentenceTransformerModel", return_value=mock_model):
+        with patch("corbell.core.indexing.builder.VoyageEmbeddingModel", return_value=mock_model):
             builder2 = IndexBuilder()
             builder2.build(workspace_config, db_path, rebuild=False)
 
@@ -194,6 +194,6 @@ def test_repo_filter_unknown_raises(workspace_config, db_path):
     mock_model = _make_mock_model()
 
     with pytest.raises(ValueError, match="not found in workspace config"):
-        with patch("corbell.core.indexing.builder.SentenceTransformerModel", return_value=mock_model):
+        with patch("corbell.core.indexing.builder.VoyageEmbeddingModel", return_value=mock_model):
             builder = IndexBuilder()
             builder.build(workspace_config, db_path, rebuild=True, repo_filter="nonexistent")

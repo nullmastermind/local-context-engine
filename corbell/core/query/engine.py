@@ -43,7 +43,7 @@ def codebase_retrieval(
     from corbell.core.workspace import build_config, db_path_for_workspace
     from corbell.core.embeddings.sqlite_store import SQLiteEmbeddingStore
     from corbell.core.embeddings.search_cache import EmbeddingSearchCache
-    from corbell.core.embeddings.model import SentenceTransformerModel, GoogleEmbeddingModel, VoyageEmbeddingModel, EmbeddingModel
+    from corbell.core.embeddings.model import GoogleEmbeddingModel, VoyageEmbeddingModel, EmbeddingModel
     from corbell.core.graph.sqlite_store import SQLiteGraphStore
     from corbell.core.indexing.builder import IndexBuilder
     from corbell.core.indexing.tracker import IndexTracker
@@ -108,7 +108,12 @@ def codebase_retrieval(
     elif model_name.startswith("voyage-"):
         emb_model = VoyageEmbeddingModel(model_name)
     else:
-        emb_model = SentenceTransformerModel(model_name)
+        raise ValueError(
+            f"Unsupported embedding model '{model_name}'. "
+            f"Set CORBELL_EMBEDDING_MODEL to a cloud model:\n"
+            f"  - voyage-code-3 or voyage-4-lite (requires VOYAGE_API_KEY)\n"
+            f"  - gemini-embedding-001 (requires GOOGLE_API_KEY)"
+        )
 
     # --- Load search cache ---
     cache = EmbeddingSearchCache()

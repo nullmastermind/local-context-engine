@@ -32,7 +32,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-local    = ["sentence-transformers>=3.0", "transformers<5.0.0"]
 openai   = ["openai>=1.0"]
 anthropic = ["anthropic>=0.25"]
 google   = ["google-genai>=2.7.0"]
