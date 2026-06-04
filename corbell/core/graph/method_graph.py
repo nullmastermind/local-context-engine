@@ -297,7 +297,9 @@ class MethodGraphBuilder:
     def __init__(self, graph_store: GraphStore):
         self.store = graph_store
 
-    def build_for_service(self, service_id: str, repo_path: Path) -> Dict[str, Any]:
+    def build_for_service(
+        self, service_id: str, repo_path: Path, file_list: Optional[List[Path]] = None
+    ) -> Dict[str, Any]:
         """Scan *repo_path* and populate method nodes + call edges.
 
         Uses tree-sitter for all supported languages when the grammar packages
@@ -307,6 +309,10 @@ class MethodGraphBuilder:
         Args:
             service_id: Identifier for the owning service.
             repo_path: Root directory of the repository to scan.
+            file_list: Optional pre-filtered list of Path objects to scan.
+                When provided, skips rglob/gitignore/skip_dirs filtering —
+                the caller is responsible for pre-filtering. Falls back to
+                the original rglob behavior when None.
 
         Returns:
             Summary dict with ``methods``, ``calls``, ``files_scanned``, ``ts_available``.
@@ -315,28 +321,41 @@ class MethodGraphBuilder:
         all_calls: List[Dict] = []
         files_scanned = 0
 
-        gitignore_spec = load_gitignore(Path(repo_path))
+        if file_list is not None:
+            # Pre-filtered list from caller — skip all filtering
+            for fp in file_list:
+                lang = _EXT_LANG.get(fp.suffix)
+                if not lang:
+                    continue
+                files_scanned += 1
+                result = self._analyze_file(fp, service_id, lang)
+                for m in result["methods"]:
+                    all_methods[m["id"]] = m
+                all_calls.extend(result["calls"])
+        else:
+            gitignore_spec = load_gitignore(Path(repo_path))
 
-        for fp in Path(repo_path).rglob("*"):
-            if not fp.is_file():
-                continue
-            # Only skip if the immediate parent directory name is in SKIP_DIRS
-            # (avoids false-positives from matching path segments like 'corbel')
-            rel = fp.relative_to(repo_path)
-            if any(part in _SKIP_DIRS for part in rel.parts):
-                continue
-            if gitignore_spec.match_file(str(rel).replace("\\", "/")):
-                continue
-            lang = _EXT_LANG.get(fp.suffix)
-            if not lang:
-                continue
-            files_scanned += 1
-            result = self._analyze_file(fp, service_id, lang)
-            for m in result["methods"]:
-                all_methods[m["id"]] = m
-            all_calls.extend(result["calls"])
+            for fp in Path(repo_path).rglob("*"):
+                if not fp.is_file():
+                    continue
+                # Only skip if the immediate parent directory name is in SKIP_DIRS
+                # (avoids false-positives from matching path segments like 'corbel')
+                rel = fp.relative_to(repo_path)
+                if any(part in _SKIP_DIRS for part in rel.parts):
+                    continue
+                if gitignore_spec.match_file(str(rel).replace("\\", "/")):
+                    continue
+                lang = _EXT_LANG.get(fp.suffix)
+                if not lang:
+                    continue
+                files_scanned += 1
+                result = self._analyze_file(fp, service_id, lang)
+                for m in result["methods"]:
+                    all_methods[m["id"]] = m
+                all_calls.extend(result["calls"])
 
-        # Persist method nodes
+        # Persist method nodes (batched)
+        method_nodes = []
         for method_id, info in all_methods.items():
             node = MethodNode(
                 id=method_id,
@@ -351,12 +370,14 @@ class MethodGraphBuilder:
                 service_id=service_id,
                 typed_signature=info.get("typed_signature"),
             )
-            self.store.upsert_node(node)
+            method_nodes.append(node)
+        self.store.upsert_nodes_batch(method_nodes)
 
-        # Build and persist call graph edges
+        # Build and persist call graph edges (batched)
         call_graph = self._build_call_graph(all_methods, all_calls)
+        edge_objects = []
         for caller_id, callee_id, meta in call_graph:
-            self.store.upsert_edge(
+            edge_objects.append(
                 DependencyEdge(
                     source_id=caller_id,
                     target_id=callee_id,
@@ -364,6 +385,7 @@ class MethodGraphBuilder:
                     metadata=meta,
                 )
             )
+        self.store.upsert_edges_batch(edge_objects)
 
         return {
             "methods": len(all_methods),

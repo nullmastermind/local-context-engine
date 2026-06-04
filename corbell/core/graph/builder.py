@@ -244,12 +244,16 @@ class ServiceGraphBuilder:
             graph_store: Instance of :class:`~corbell.core.graph.schema.GraphStore`.
         """
         self.store = graph_store
+        self._content_cache: Dict[Path, str] = {}
+        self._pending_nodes: list = []
+        self._pending_edges: list = []
 
     def build_from_workspace(
         self,
         services: List[Dict[str, Any]],
         clear_existing: bool = True,
         method_level: bool = False,
+        file_list: Optional[List[Path]] = None,
     ) -> Dict[str, Any]:
         """Scan all service repos and populate the graph.
 
@@ -258,12 +262,18 @@ class ServiceGraphBuilder:
                 ``language``, ``tags``.
             clear_existing: Clear the store before building.
             method_level: If True, also build method-call edges.
+            file_list: Optional pre-filtered list of Path objects covering all
+                repos. When provided, used instead of calling ``_iter_files``
+                (skips rglob). Falls back to rglob when None.
 
         Returns:
             Summary dict with counts of services, datastores, queues, methods.
         """
         if clear_existing:
             self.store.clear()
+
+        self._pending_nodes = []
+        self._pending_edges = []
 
         discovered: List[Dict] = []
 
@@ -277,8 +287,17 @@ class ServiceGraphBuilder:
                 continue
 
             # Gather all relevant files first so we can sniff the service type
-            gitignore_spec = load_gitignore(repo_path)
-            files = list(self._iter_files(repo_path, language, gitignore_spec))
+            if file_list is not None:
+                # Use pre-filtered list — filter to files under this repo_path
+                repo_path_str = str(repo_path)
+                files = [
+                    fp for fp in file_list
+                    if str(fp).startswith(repo_path_str)
+                ]
+            else:
+                gitignore_spec = load_gitignore(repo_path)
+                files = list(self._iter_files(repo_path, language, gitignore_spec))
+
             service_type = self._detect_service_type(files, language)
 
             node = ServiceNode(
@@ -289,7 +308,7 @@ class ServiceGraphBuilder:
                 tags=tags,
                 service_type=service_type,
             )
-            self.store.upsert_node(node)
+            self._pending_nodes.append(node)
             discovered.append(
                 {
                     "id": svc_id,
@@ -300,6 +319,16 @@ class ServiceGraphBuilder:
             )
 
         # Phase 2: deps, HTTP calls
+        # Populate content cache for all discovered files (read once, used across phases)
+        self._content_cache = {}
+        for svc in discovered:
+            for fp in svc["files"]:
+                if fp not in self._content_cache:
+                    try:
+                        self._content_cache[fp] = fp.read_text(encoding="utf-8", errors="ignore")
+                    except Exception:
+                        self._content_cache[fp] = ""
+
         datastore_ids: set = set()
         queue_ids: set = set()
 
@@ -312,6 +341,15 @@ class ServiceGraphBuilder:
         for svc in discovered:
             self._detect_http_calls(svc, discovered)
             self._detect_library_deps(svc, all_service_ids)
+
+        # Free cached content
+        self._content_cache = {}
+
+        # Flush all accumulated nodes and edges in two bulk writes
+        self.store.upsert_nodes_batch(self._pending_nodes)
+        self.store.upsert_edges_batch(self._pending_edges)
+        self._pending_nodes = []
+        self._pending_edges = []
 
         # Phase 4: method-level graph
         service_diagnostics: Dict[str, Any] = {}
@@ -405,6 +443,8 @@ class ServiceGraphBuilder:
         return False
 
     def _read(self, fp: Path) -> str:
+        if fp in self._content_cache:
+            return self._content_cache[fp]
         try:
             return fp.read_text(encoding="utf-8", errors="ignore")
         except Exception:
@@ -486,10 +526,10 @@ class ServiceGraphBuilder:
                     ds_id = f"datastore:{db_type}:{db_name}"
                     if ds_id not in datastore_ids:
                         datastore_ids.add(ds_id)
-                        self.store.upsert_node(DataStoreNode(id=ds_id, kind=db_type, name=db_name))
-                    
+                        self._pending_nodes.append(DataStoreNode(id=ds_id, kind=db_type, name=db_name))
+
                     direction = self._classify_io_direction(content, idx)
-                    self.store.upsert_edge(
+                    self._pending_edges.append(
                         DependencyEdge(
                             source_id=svc_id,
                             target_id=ds_id,
@@ -516,11 +556,11 @@ class ServiceGraphBuilder:
                     q_id = f"queue:{q_type}:{q_name}"
                     if q_id not in queue_ids:
                         queue_ids.add(q_id)
-                        self.store.upsert_node(QueueNode(id=q_id, kind=q_type, name=q_name))
-                    
+                        self._pending_nodes.append(QueueNode(id=q_id, kind=q_type, name=q_name))
+
                     direction = self._classify_io_direction(content, idx)
                     edge_kind = "queue_publish" if direction == "write" else "queue_consume"
-                    self.store.upsert_edge(
+                    self._pending_edges.append(
                         DependencyEdge(
                             source_id=svc_id,
                             target_id=q_id,
@@ -552,7 +592,7 @@ class ServiceGraphBuilder:
                     svc_slug = other_id.replace("-", "").replace("_", "").lower()
                     url_clean = url_host.replace("-", "").replace("_", "").lower()
                     if svc_slug in url_clean:
-                        self.store.upsert_edge(
+                        self._pending_edges.append(
                             DependencyEdge(
                                 source_id=svc_id,
                                 target_id=other_id,
@@ -584,7 +624,7 @@ class ServiceGraphBuilder:
                                     break
                             
                             if mapped_svc_id:
-                                self.store.upsert_edge(
+                                self._pending_edges.append(
                                     DependencyEdge(
                                         source_id=svc_id,
                                         target_id=mapped_svc_id,
@@ -597,7 +637,7 @@ class ServiceGraphBuilder:
                                     )
                                 )
                             else:
-                                self.store.upsert_edge(
+                                self._pending_edges.append(
                                     DependencyEdge(
                                         source_id=svc_id,
                                         target_id="external:env_url",
@@ -630,7 +670,7 @@ class ServiceGraphBuilder:
                         break
                 
                 if mapped_svc_id:
-                    self.store.upsert_edge(
+                    self._pending_edges.append(
                         DependencyEdge(
                             source_id=svc_id,
                             target_id=mapped_svc_id,
@@ -665,7 +705,7 @@ class ServiceGraphBuilder:
                 content = self._read(fp)
                 for exact_name, target_id in exact_to_id.items():
                     if f'"{exact_name}"' in content or f"'{exact_name}'" in content or f" {exact_name}==" in content:
-                        self.store.upsert_edge(
+                        self._pending_edges.append(
                             DependencyEdge(
                                 source_id=svc_id,
                                 target_id=target_id,
@@ -685,7 +725,7 @@ class ServiceGraphBuilder:
                     import_pattern_js = rf"(?:import|require).*{exact_name}"
                     
                     if re.search(import_pattern_py, content) or re.search(import_pattern_js, content):
-                        self.store.upsert_edge(
+                        self._pending_edges.append(
                             DependencyEdge(
                                 source_id=svc_id,
                                 target_id=target_id,

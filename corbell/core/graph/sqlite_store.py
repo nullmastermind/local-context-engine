@@ -134,6 +134,31 @@ class SQLiteGraphStore(GraphStore):
             )
             conn.commit()
 
+    def upsert_nodes_batch(self, nodes: list) -> None:
+        """Batch-upsert multiple nodes in a single transaction."""
+        if not nodes:
+            return
+        with self._conn() as conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO graph_nodes (id, node_type, data) VALUES (?, ?, ?)",
+                [(node.id, _node_type_str(node), json.dumps(_node_to_dict(node))) for node in nodes],
+            )
+            conn.commit()
+
+    def upsert_edges_batch(self, edges: list) -> None:
+        """Batch-upsert multiple edges in a single transaction."""
+        if not edges:
+            return
+        with self._conn() as conn:
+            conn.executemany(
+                """INSERT INTO graph_edges (source_id, target_id, kind, metadata)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(source_id, target_id, kind)
+                   DO UPDATE SET metadata = excluded.metadata""",
+                [(e.source_id, e.target_id, e.kind, json.dumps(e.metadata)) for e in edges],
+            )
+            conn.commit()
+
     def _load_node(self, row) -> ServiceNode | DataStoreNode | QueueNode | MethodNode:
         return _dict_to_node(row["node_type"], json.loads(row["data"]))
 

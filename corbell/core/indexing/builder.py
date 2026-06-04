@@ -320,6 +320,7 @@ class IndexBuilder:
         total_repos = 0
         services_data = []
         workers = _get_worker_count()
+        repo_file_lists: Dict[str, List[Path]] = {}  # repo_path str -> list of Path objects
 
         for repo in repos:
             repo_id = repo.id
@@ -343,6 +344,9 @@ class IndexBuilder:
             file_list = _collect_repo_files(
                 repo_path, repo_id, indexing.max_file_bytes, gitignore_spec
             )
+
+            # Store Path objects for graph builders (reuse same walk)
+            repo_file_lists[str(repo_path)] = [Path(abs_path) for abs_path, rel, lang in file_list]
 
             if not file_list:
                 total_repos += 1
@@ -399,14 +403,26 @@ class IndexBuilder:
 
         # Build graph
         from corbell.core.graph.builder import ServiceGraphBuilder
-        from corbell.core.graph.method_graph import MethodGraphBuilder
+        from corbell.core.graph.method_graph import MethodGraphBuilder, _EXT_LANG as _GRAPH_EXT_LANG
         if progress_fn:
             progress_fn("Building call graph...")
         sgb = ServiceGraphBuilder(graph_store)
         mgb = MethodGraphBuilder(graph_store)
-        sgb.build_from_workspace(services_data, clear_existing=False, method_level=False)
+
+        # Collect all indexed files across repos for ServiceGraphBuilder
+        all_indexed_files: List[Path] = []
+        for file_paths in repo_file_lists.values():
+            all_indexed_files.extend(file_paths)
+
+        sgb.build_from_workspace(
+            services_data, clear_existing=False, method_level=False,
+            file_list=all_indexed_files,
+        )
         for svc in services_data:
-            mgb.build_for_service(svc["id"], svc["resolved_path"])
+            repo_path_str = str(svc["resolved_path"])
+            all_files = repo_file_lists.get(repo_path_str, [])
+            graph_file_list = [fp for fp in all_files if fp.suffix in _GRAPH_EXT_LANG]
+            mgb.build_for_service(svc["id"], svc["resolved_path"], file_list=graph_file_list)
 
         # Store global metadata LAST (after all commits)
         tracker.set_meta("embedding_model", model_name)
