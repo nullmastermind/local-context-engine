@@ -92,7 +92,15 @@ def debug(
             graph_ids = result.diagnostics.graph_chunk_ids
         for chunk in result.pre_rerank_chunks:
             chunk_id = getattr(chunk, "chunk_id", "")
-            source = "graph" if chunk_id in graph_ids else "embedding"
+            parts = chunk_id.split("+") if chunk_id else []
+            has_graph = any(p in graph_ids for p in parts) if graph_ids else False
+            has_embedding = any(p not in graph_ids for p in parts) if graph_ids else True
+            if has_graph and has_embedding and len(parts) > 1:
+                source = "embedding+graph"
+            elif has_graph:
+                source = "graph"
+            else:
+                source = "embedding"
             pre_rerank_rows.append([
                 getattr(chunk, "file_path", ""),
                 f"{getattr(chunk, 'start_line', '')}-{getattr(chunk, 'end_line', '')}",

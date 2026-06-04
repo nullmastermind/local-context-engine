@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
@@ -107,11 +108,17 @@ def rerank_chunks(
     system = (
         "You are a code search relevance ranker. "
         "Given a query and numbered code chunks with metadata (relevance score, callers count, "
-        "callees count, flow membership), return a JSON array of chunk indices ordered from most "
-        "relevant to least relevant. "
+        "callees count, flow membership), your job is to rank the chunks by relevance to the query. "
         "OMIT chunks that are not relevant to the query. "
         "Higher score, more callers, and flow membership indicate higher structural importance. "
-        "Return ONLY a valid JSON array of integers, e.g. [2,0,5]."
+        "When both source code and documentation chunks are relevant to the query, "
+        "prefer source code over documentation because code is the source of truth. "
+        "Documentation can be outdated or inaccurate, but the code always reflects actual behavior. "
+        "Your output MUST contain a pair of XML tags called ranked_indices. "
+        "Between the opening <ranked_indices> tag and the closing </ranked_indices> tag, "
+        "place a JSON array of integer chunk indices sorted from most relevant to least relevant. "
+        "Only include indices of chunks that are actually relevant to the query. "
+        "Do not include any other text between the tags, only the JSON array."
     )
 
     separator = "---\n"
@@ -120,7 +127,9 @@ def rerank_chunks(
     user = (
         f"Query: {query}\n\n"
         f"Chunks:\n{chunks_text}\n\n"
-        "Return JSON array of relevant chunk indices (most relevant first):"
+        "Now rank the chunks by relevance. "
+        "Write the opening tag <ranked_indices>, then a JSON array of the relevant chunk indices "
+        "from most to least relevant, then the closing tag </ranked_indices>."
     )
 
     t0 = time.time()
@@ -134,13 +143,19 @@ def rerank_chunks(
         raw_response = response
         elapsed = time.time() - t0
 
-        text = response.strip()
-        if text.startswith("```"):
-            lines = text.splitlines()
-            text = "\n".join(
-                line for line in lines
-                if not line.startswith("```")
-            ).strip()
+        # Extract JSON from <ranked_indices>...</ranked_indices> tags
+        tag_match = re.search(r"<ranked_indices>\s*(.*?)\s*</ranked_indices>", response, re.DOTALL)
+        if tag_match:
+            text = tag_match.group(1).strip()
+        else:
+            # Fallback: try parsing raw response (legacy or non-thinking LLMs)
+            text = response.strip()
+            if text.startswith("```"):
+                lines = text.splitlines()
+                text = "\n".join(
+                    line for line in lines
+                    if not line.startswith("```")
+                ).strip()
 
         indices = json.loads(text)
 
