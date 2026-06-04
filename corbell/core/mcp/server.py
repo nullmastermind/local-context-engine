@@ -24,8 +24,6 @@ mcp = FastMCP("corbell", dependencies=["corbell"])
 def context_engine_codebase_retrieval(
     query: str,
     workspace_full_path: str = "",
-    top_k: int = 50,
-    rerank: bool = True,
 ) -> str:
     """Search the indexed codebase and return relevant code snippets.
 
@@ -36,8 +34,6 @@ def context_engine_codebase_retrieval(
         query: Natural language description of the code you're looking for.
         workspace_full_path: Full path to the workspace (repository) root directory.
             Falls back to CORBELL_WORKSPACE env var if empty.
-        top_k: Maximum number of code chunks to return (default 50).
-        rerank: Whether to use LLM reranking for better relevance (default true).
 
     Returns:
         Formatted code snippets, or an error string on failure.
@@ -109,9 +105,9 @@ def context_engine_codebase_retrieval(
         result = codebase_retrieval(
             query=query,
             workspace_path=ws_path,
-            top_k=top_k,
+            top_k=50,
             use_llm=True,
-            rerank=rerank,
+            rerank=True,
         )
 
         return result

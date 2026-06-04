@@ -50,8 +50,6 @@ def debug(
         env_vars_text: str,
         mcp_workspace: str,
         mcp_query: str,
-        mcp_top_k: int,
-        mcp_rerank: bool,
     ):  # type: ignore[no-untyped-def]
         """Invoke context_engine_codebase_retrieval directly and return results."""
         if not mcp_query.strip():
@@ -77,8 +75,6 @@ def debug(
             result = context_engine_codebase_retrieval(
                 query=mcp_query.strip(),
                 workspace_full_path=mcp_workspace.strip(),
-                top_k=int(mcp_top_k),
-                rerank=bool(mcp_rerank),
             )
 
             if result.startswith("Error:"):
@@ -267,18 +263,6 @@ def debug(
                     label="query",
                     placeholder="e.g. authentication middleware",
                 )
-                with gr.Row():
-                    mcp_top_k_input = gr.Number(
-                        label="top_k",
-                        value=50,
-                        precision=0,
-                        minimum=1,
-                        maximum=500,
-                    )
-                    mcp_rerank_input = gr.Checkbox(
-                        label="rerank",
-                        value=True,
-                    )
 
                 mcp_run_btn = gr.Button("Invoke MCP Tool", variant="primary")
 
@@ -313,8 +297,6 @@ def debug(
                 mcp_env_vars,
                 mcp_workspace_input,
                 mcp_query_input,
-                mcp_top_k_input,
-                mcp_rerank_input,
             ],
             outputs=[mcp_error_box, mcp_result_box],
         )
