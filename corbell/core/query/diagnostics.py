@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from corbell.core.query.graph_expander import ScoredChunk
+    from corbell.core.query.reranker import RerankResult
 
 
 @dataclass
@@ -21,6 +25,18 @@ class QueryDiagnostics:
     # Thresholds for emitting warnings
     _FILE_THRESHOLD: int = field(default=3, init=False, repr=False)
     _METHOD_THRESHOLD: int = field(default=5, init=False, repr=False)
+
+    # Timing: phase name -> elapsed seconds
+    timing: Dict[str, float] = field(default_factory=dict)
+
+    # Debug mode: when True, pre-rerank chunks and rerank detail are captured
+    collect_debug: bool = False
+    pre_rerank_chunks: Optional[List["ScoredChunk"]] = None
+    rerank_detail: Optional["RerankResult"] = None
+
+    def record_time(self, phase: str, elapsed: float) -> None:
+        """Record elapsed time for a named pipeline phase."""
+        self.timing[phase] = elapsed
 
     def summary(self) -> Optional[str]:
         """Return a warning string if any counter exceeds its threshold.

@@ -4,41 +4,47 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
-def codebase_retrieval(
+@dataclass
+class DebugResult:
+    """Rich result from codebase_retrieval_debug(), including pipeline internals."""
+
+    final_output: str
+    pre_rerank_chunks: List[Any]
+    rerank_detail: Optional[Any]
+    diagnostics: Any
+    error: Optional[str]
+
+
+def _execute_pipeline(
     query: str,
-    workspace_path: str | Path,
+    workspace_path: Path,
     top_k: int = 50,
     use_llm: bool = True,
     rerank: bool = True,
-) -> str:
-    """Execute the full code retrieval pipeline.
+    diagnostics: Optional[Any] = None,
+) -> Tuple[str, Any]:
+    """Execute the full code retrieval pipeline and return (output, diagnostics).
 
-    Pipeline:
-    1. Load workspace config and open stores.
-    2. Auto-index check (empty → full build, stale → blocking incremental rebuild).
-       Skipped entirely when last build completed within the past 30 seconds.
-    3. Embedding search via EmbeddingSearchCache (raw query used directly).
-    4. Graph call-chain expansion.
-    5. Merge + dedup.
-    6. LLM rerank (optional).
-    7. Format results.
+    Extracted from codebase_retrieval() to allow debug callers to pass in a
+    pre-configured QueryDiagnostics (e.g. with collect_debug=True).
 
     Args:
         query: Natural language query string.
-        workspace_path: Path to the workspace (repository) root directory.
+        workspace_path: Resolved absolute path to the workspace root.
         top_k: Maximum number of chunks to pass to reranker.
         use_llm: If False, skip reranking.
         rerank: If False, skip reranking even when LLM is configured.
+        diagnostics: Optional QueryDiagnostics instance; created if None.
 
     Returns:
-        Formatted code snippet string ready for LLM context injection.
-        Returns an error string (prefixed with "Error:") on failure.
+        Tuple of (formatted_output_string, diagnostics).
     """
     from corbell.core.workspace import build_config, db_path_for_workspace
     from corbell.core.embeddings.sqlite_store import SQLiteEmbeddingStore
@@ -53,10 +59,15 @@ def codebase_retrieval(
     from corbell.core.query.reranker import rerank_chunks
     from corbell.core.query.formatter import format_results
 
-    workspace_path = Path(workspace_path).resolve()
+    if diagnostics is None:
+        diagnostics = QueryDiagnostics()
 
     if not workspace_path.exists():
-        return f"Error: Workspace directory not found: {workspace_path}. Run 'corbell index build' first."
+        return (
+            f"Error: Workspace directory not found: {workspace_path}. "
+            "Run 'corbell index build' first.",
+            diagnostics,
+        )
 
     cfg = build_config(workspace_path)
     db_path = db_path_for_workspace(workspace_path, model=cfg.storage.resolved_model())
@@ -120,7 +131,7 @@ def codebase_retrieval(
     cache.load(emb_store)
 
     if not cache.is_loaded:
-        return "No index found. Run 'corbell index build' first."
+        return "No index found. Run 'corbell index build' first.", diagnostics
 
     # --- Embedding search ---
     import numpy as np
@@ -128,118 +139,235 @@ def codebase_retrieval(
     all_embedding_results: dict[str, ScoredChunk] = {}
     query_config = cfg.query
 
-    for sq in search_queries:
-        try:
-            if isinstance(emb_model, GoogleEmbeddingModel):
-                formatted_query = emb_model.prepare_query(sq) if emb_model.uses_prefix_format else sq
-                q_vecs = emb_model.encode([formatted_query], task_type="RETRIEVAL_QUERY")
-            elif isinstance(emb_model, VoyageEmbeddingModel):
-                q_vecs = emb_model.encode([sq], input_type="query")
-            else:
-                q_vecs = emb_model.encode([sq])
-        except Exception as exc:
-            return f"Error: Failed to load embedding model '{model_name}'. Ensure 'sentence-transformers' is installed. ({exc})"
+    t0 = time.time()
+    try:
+        for sq in search_queries:
+            try:
+                if isinstance(emb_model, GoogleEmbeddingModel):
+                    formatted_query = (
+                        emb_model.prepare_query(sq) if emb_model.uses_prefix_format else sq
+                    )
+                    q_vecs = emb_model.encode([formatted_query], task_type="RETRIEVAL_QUERY")
+                elif isinstance(emb_model, VoyageEmbeddingModel):
+                    q_vecs = emb_model.encode([sq], input_type="query")
+                else:
+                    q_vecs = emb_model.encode([sq])
+            except Exception as exc:
+                return (
+                    f"Error: Failed to load embedding model '{model_name}'. "
+                    f"Ensure 'sentence-transformers' is installed. ({exc})",
+                    diagnostics,
+                )
 
-        q_vec = np.array(q_vecs[0], dtype=np.float32)
-        hits = cache.search(q_vec, top_k=top_k)
+            q_vec = np.array(q_vecs[0], dtype=np.float32)
+            hits = cache.search(q_vec, top_k=top_k)
 
-        if not hits:
-            continue
+            if not hits:
+                continue
 
-        # Fetch full records for top hits
-        hit_ids = [h[0] for h in hits]
-        hit_scores = {h[0]: h[1] for h in hits}
+            # Fetch full records for top hits
+            hit_ids = [h[0] for h in hits]
+            hit_scores = {h[0]: h[1] for h in hits}
 
-        try:
-            records = emb_store.get_chunks_by_ids(hit_ids)
-        except Exception:
-            continue
+            try:
+                records = emb_store.get_chunks_by_ids(hit_ids)
+            except Exception:
+                continue
 
-        # Build repo_path map for resolving absolute paths
-        repo_path_map = {
-            r.id: str(r.resolved_path) for r in cfg.repos if r.resolved_path
-        }
+            # Build repo_path map for resolving absolute paths
+            repo_path_map = {
+                r.id: str(r.resolved_path) for r in cfg.repos if r.resolved_path
+            }
 
-        for record in records:
-            score = hit_scores.get(record.id, 0.0)
-            # Resolve absolute file path
-            abs_path = record.file_path
-            repo_root = repo_path_map.get(record.service_id, "")
-            if repo_root and not Path(abs_path).is_absolute():
-                abs_path = str((Path(repo_root) / abs_path).resolve())
+            for record in records:
+                score = hit_scores.get(record.id, 0.0)
+                # Resolve absolute file path
+                abs_path = record.file_path
+                repo_root = repo_path_map.get(record.service_id, "")
+                if repo_root and not Path(abs_path).is_absolute():
+                    abs_path = str((Path(repo_root) / abs_path).resolve())
 
-            chunk = ScoredChunk(
-                chunk_id=record.id,
-                score=score,
-                file_path=abs_path,
-                start_line=record.start_line,
-                end_line=record.end_line,
-                content=record.content,
-                repo_id=record.service_id,
-                symbol=record.symbol,
-                chunk_type=record.chunk_type,
-                language=record.language,
-            )
+                chunk = ScoredChunk(
+                    chunk_id=record.id,
+                    score=score,
+                    file_path=abs_path,
+                    start_line=record.start_line,
+                    end_line=record.end_line,
+                    content=record.content,
+                    repo_id=record.service_id,
+                    symbol=record.symbol,
+                    chunk_type=record.chunk_type,
+                    language=record.language,
+                )
 
-            # Keep max score for deduplication across queries
-            existing = all_embedding_results.get(record.id)
-            if existing is None or score > existing.score:
-                all_embedding_results[record.id] = chunk
+                # Keep max score for deduplication across queries
+                existing = all_embedding_results.get(record.id)
+                if existing is None or score > existing.score:
+                    all_embedding_results[record.id] = chunk
+    finally:
+        diagnostics.record_time("embedding_search", time.time() - t0)
 
     if not all_embedding_results:
-        return "No relevant code found for the given query."
+        return "No relevant code found for the given query.", diagnostics
 
     base_chunks = list(all_embedding_results.values())
 
     # --- Graph expansion ---
-    diagnostics = QueryDiagnostics()
-    bonus_chunks = expand_via_graph(
-        embedding_results=base_chunks,
-        graph_store=graph_store,
-        repos=cfg.repos,
-        max_depth=query_config.expand_call_depth,
-        max_chunks=query_config.expand_max_chunks,
-        diagnostics=diagnostics,
-    )
+    t0 = time.time()
+    try:
+        bonus_chunks = expand_via_graph(
+            embedding_results=base_chunks,
+            graph_store=graph_store,
+            repos=cfg.repos,
+            max_depth=query_config.expand_call_depth,
+            max_chunks=query_config.expand_max_chunks,
+            diagnostics=diagnostics,
+        )
+    finally:
+        diagnostics.record_time("graph_expansion", time.time() - t0)
 
     all_chunks = base_chunks + bonus_chunks
 
     # --- Merge + dedup ---
-    merged = merge_and_dedup(all_chunks)
+    t0 = time.time()
+    try:
+        merged = merge_and_dedup(all_chunks)
+        # Apply top_k cap
+        merged = merged[:top_k]
+    finally:
+        diagnostics.record_time("merge_dedup", time.time() - t0)
 
-    # --- Apply top_k cap ---
-    merged = merged[:top_k]
+    # Capture pre-rerank state for debug mode
+    if diagnostics.collect_debug:
+        diagnostics.pre_rerank_chunks = list(merged)
 
     # --- LLM rerank ---
-    do_rerank = use_llm and rerank and query_config.rerank
-    if do_rerank:
-        # Annotate chunks with graph metadata before sending to the reranker
-        graph_meta = _annotate_with_graph_meta(merged, graph_store, cfg.repos)
+    t0 = time.time()
+    try:
+        do_rerank = use_llm and rerank and query_config.rerank
+        if do_rerank:
+            # Annotate chunks with graph metadata before sending to the reranker
+            graph_meta = _annotate_with_graph_meta(merged, graph_store, cfg.repos)
 
-        rerank_start = time.time()
-        reranked_ids = rerank_chunks(query, merged, llm_client, graph_meta=graph_meta)
-        rerank_elapsed = time.time() - rerank_start
-        logger.info(
-            "Rerank complete: %.3fs, %d/%d chunks kept, order: %s",
-            rerank_elapsed,
-            len(reranked_ids),
-            len(merged),
-            reranked_ids,
-        )
-        # Reorder merged, keeping only chunks selected by the reranker
-        id_to_chunk = {c.chunk_id: c for c in merged}
-        merged = [id_to_chunk[cid] for cid in reranked_ids if cid in id_to_chunk]
+            rerank_result = rerank_chunks(query, merged, llm_client, graph_meta=graph_meta)
+            reranked_ids = rerank_result.chunk_ids
+
+            if diagnostics.collect_debug:
+                diagnostics.rerank_detail = rerank_result
+
+            logger.info(
+                "Rerank complete: %.3fs, %d/%d chunks kept, order: %s",
+                rerank_result.elapsed_seconds,
+                len(reranked_ids),
+                len(merged),
+                reranked_ids,
+            )
+            # Reorder merged, keeping only chunks selected by the reranker
+            id_to_chunk = {c.chunk_id: c for c in merged}
+            merged = [id_to_chunk[cid] for cid in reranked_ids if cid in id_to_chunk]
+    finally:
+        diagnostics.record_time("rerank", time.time() - t0)
 
     # --- Format output ---
-    repo_paths = {r.id: str(r.resolved_path) for r in cfg.repos if r.resolved_path}
-    output = format_results(merged, repo_paths)
+    t0 = time.time()
+    try:
+        repo_paths = {r.id: str(r.resolved_path) for r in cfg.repos if r.resolved_path}
+        output = format_results(merged, repo_paths)
 
-    # Prepend diagnostics warning if thresholds exceeded
-    warning = diagnostics.summary()
-    if warning:
-        output = f"[warnings: {warning}]\n\n{output}"
+        # Prepend diagnostics warning if thresholds exceeded
+        warning = diagnostics.summary()
+        if warning:
+            output = f"[warnings: {warning}]\n\n{output}"
+    finally:
+        diagnostics.record_time("format", time.time() - t0)
 
+    return output, diagnostics
+
+
+def codebase_retrieval(
+    query: str,
+    workspace_path: str | Path,
+    top_k: int = 50,
+    use_llm: bool = True,
+    rerank: bool = True,
+) -> str:
+    """Execute the full code retrieval pipeline.
+
+    Pipeline:
+    1. Load workspace config and open stores.
+    2. Auto-index check (empty → full build, stale → blocking incremental rebuild).
+       Skipped entirely when last build completed within the past 30 seconds.
+    3. Embedding search via EmbeddingSearchCache (raw query used directly).
+    4. Graph call-chain expansion.
+    5. Merge + dedup.
+    6. LLM rerank (optional).
+    7. Format results.
+
+    Args:
+        query: Natural language query string.
+        workspace_path: Path to the workspace (repository) root directory.
+        top_k: Maximum number of chunks to pass to reranker.
+        use_llm: If False, skip reranking.
+        rerank: If False, skip reranking even when LLM is configured.
+
+    Returns:
+        Formatted code snippet string ready for LLM context injection.
+        Returns an error string (prefixed with "Error:") on failure.
+    """
+    output, _ = _execute_pipeline(
+        query,
+        Path(workspace_path).resolve(),
+        top_k=top_k,
+        use_llm=use_llm,
+        rerank=rerank,
+    )
     return output
+
+
+def codebase_retrieval_debug(
+    query: str,
+    workspace_path: str | Path,
+    top_k: int = 50,
+) -> DebugResult:
+    """Execute the retrieval pipeline in debug mode, returning full internals.
+
+    Same pipeline as codebase_retrieval(), but captures pre-rerank chunks,
+    rerank prompts/response, per-phase timing, and any error.
+
+    Args:
+        query: Natural language query string.
+        workspace_path: Path to the workspace root directory.
+        top_k: Maximum number of chunks to pass to reranker.
+
+    Returns:
+        DebugResult with final_output, pre_rerank_chunks, rerank_detail,
+        diagnostics (including timing), and error (if any).
+    """
+    from corbell.core.query.diagnostics import QueryDiagnostics
+
+    diag = QueryDiagnostics(collect_debug=True)
+    try:
+        output, diag = _execute_pipeline(
+            query,
+            Path(workspace_path).resolve(),
+            top_k=top_k,
+            diagnostics=diag,
+        )
+        error = None
+        if output.startswith("Error:") or output.startswith("No "):
+            error = output
+            output = ""
+    except Exception as exc:
+        output = ""
+        error = f"{type(exc).__name__}: {exc}"
+
+    return DebugResult(
+        final_output=output,
+        pre_rerank_chunks=diag.pre_rerank_chunks or [],
+        rerank_detail=diag.rerank_detail,
+        diagnostics=diag,
+        error=error,
+    )
 
 
 def _annotate_with_graph_meta(

@@ -3,10 +3,24 @@
 from __future__ import annotations
 
 import json
+import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from corbell.core.query.graph_expander import ScoredChunk
+
+
+@dataclass
+class RerankResult:
+    """Result from a rerank_chunks() call, including debug info."""
+
+    chunk_ids: List[str]
+    system_prompt: str
+    user_prompt: str
+    raw_response: Optional[str]
+    elapsed_seconds: float
+    fallback_used: bool
 
 
 def rerank_chunks(
@@ -14,7 +28,7 @@ def rerank_chunks(
     chunks: List["ScoredChunk"],
     llm_client: Optional[Any],
     graph_meta: Optional[Dict[str, Dict]] = None,
-) -> List[str]:
+) -> RerankResult:
     """Rerank and filter query results using an LLM.
 
     Sends chunk content + metadata to the LLM. The LLM returns a JSON array
@@ -32,17 +46,31 @@ def rerank_chunks(
             metadata is included in the chunk header sent to the LLM.
 
     Returns:
-        List of chunk_ids in reranked order (most relevant first).
+        RerankResult with chunk_ids in reranked order (most relevant first).
         Irrelevant chunks are excluded.
-        Falls back to original order on any failure.
+        Falls back to original order on any failure (fallback_used=True).
     """
     if not chunks:
-        return []
+        return RerankResult(
+            chunk_ids=[],
+            system_prompt="",
+            user_prompt="",
+            raw_response=None,
+            elapsed_seconds=0.0,
+            fallback_used=False,
+        )
 
     all_ids = [c.chunk_id for c in chunks]
 
     if llm_client is None or not getattr(llm_client, "is_configured", False):
-        return all_ids
+        return RerankResult(
+            chunk_ids=all_ids,
+            system_prompt="",
+            user_prompt="",
+            raw_response=None,
+            elapsed_seconds=0.0,
+            fallback_used=False,
+        )
 
     # Build payload with code content, indexed for compact LLM output
     entries = []
@@ -95,12 +123,17 @@ def rerank_chunks(
         "Return JSON array of relevant chunk indices (most relevant first):"
     )
 
+    t0 = time.time()
+    raw_response: Optional[str] = None
+
     try:
         response = llm_client.call(
             system, user,
             max_tokens=200,
             temperature=0.0,
         )
+        raw_response = response
+        elapsed = time.time() - t0
 
         text = response.strip()
         if text.startswith("```"):
@@ -113,7 +146,14 @@ def rerank_chunks(
         indices = json.loads(text)
 
         if not isinstance(indices, list):
-            return all_ids
+            return RerankResult(
+                chunk_ids=all_ids,
+                system_prompt=system,
+                user_prompt=user,
+                raw_response=raw_response,
+                elapsed_seconds=elapsed,
+                fallback_used=True,
+            )
 
         # Validate indices are ints within range
         n = len(chunks)
@@ -123,9 +163,31 @@ def rerank_chunks(
         ]
 
         if not filtered:
-            return all_ids
+            return RerankResult(
+                chunk_ids=all_ids,
+                system_prompt=system,
+                user_prompt=user,
+                raw_response=raw_response,
+                elapsed_seconds=elapsed,
+                fallback_used=True,
+            )
 
-        return filtered
+        return RerankResult(
+            chunk_ids=filtered,
+            system_prompt=system,
+            user_prompt=user,
+            raw_response=raw_response,
+            elapsed_seconds=elapsed,
+            fallback_used=False,
+        )
 
     except Exception:
-        return all_ids
+        elapsed = time.time() - t0
+        return RerankResult(
+            chunk_ids=all_ids,
+            system_prompt=system,
+            user_prompt=user,
+            raw_response=raw_response,
+            elapsed_seconds=elapsed,
+            fallback_used=True,
+        )

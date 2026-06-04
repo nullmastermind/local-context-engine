@@ -8,6 +8,7 @@ import typer
 from dotenv import load_dotenv
 from rich.console import Console
 
+from corbell.cli.commands.debug import app as debug_app
 from corbell.cli.commands.index import app as index_app
 from corbell.cli.commands.query import app as query_app
 
@@ -32,6 +33,7 @@ console = Console()
 
 app.add_typer(index_app, name="index", help="Code index commands.")
 app.add_typer(query_app, name="query", help="Code search commands.")
+app.add_typer(debug_app, name="debug", help="Query debug UI.")
 
 
 # ---------------------------------------------------------------------------

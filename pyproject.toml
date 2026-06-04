@@ -62,6 +62,7 @@ dev      = [
   "ruff",
   "mypy",
 ]
+debug    = ["gradio>=4.0"]
 
 [project.scripts]
 corbell = "corbell.cli.main:main"
