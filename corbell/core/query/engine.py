@@ -228,6 +228,10 @@ def _execute_pipeline(
 
     all_chunks = base_chunks + bonus_chunks
 
+    # Track which chunks came from graph expansion
+    if diagnostics.collect_debug:
+        diagnostics.graph_chunk_ids = {c.chunk_id for c in bonus_chunks}
+
     # --- Merge + dedup ---
     t0 = time.time()
     try:

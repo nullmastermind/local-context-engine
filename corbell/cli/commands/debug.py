@@ -87,13 +87,19 @@ def debug(
 
         # --- Pre-rerank table ---
         pre_rerank_rows = []
+        graph_ids = set()
+        if result.diagnostics and result.diagnostics.graph_chunk_ids:
+            graph_ids = result.diagnostics.graph_chunk_ids
         for chunk in result.pre_rerank_chunks:
+            chunk_id = getattr(chunk, "chunk_id", "")
+            source = "graph" if chunk_id in graph_ids else "embedding"
             pre_rerank_rows.append([
                 getattr(chunk, "file_path", ""),
                 f"{getattr(chunk, 'start_line', '')}-{getattr(chunk, 'end_line', '')}",
                 f"{getattr(chunk, 'score', 0.0):.4f}",
                 getattr(chunk, "symbol", "") or "",
                 getattr(chunk, "chunk_type", "") or "",
+                source,
                 getattr(chunk, "content", "") or "",
             ])
 
@@ -152,8 +158,8 @@ def debug(
 
             with gr.Tab("Pre-Rerank Chunks"):
                 pre_rerank_table = gr.Dataframe(
-                    headers=["File", "Lines", "Score", "Symbol", "Type", "Content"],
-                    datatype=["str", "str", "str", "str", "str", "str"],
+                    headers=["File", "Lines", "Score", "Symbol", "Type", "Source", "Content"],
+                    datatype=["str", "str", "str", "str", "str", "str", "str"],
                     label="Chunks before reranking",
                     wrap=False,
                 )

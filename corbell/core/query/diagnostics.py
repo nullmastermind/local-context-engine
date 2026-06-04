@@ -33,6 +33,7 @@ class QueryDiagnostics:
     collect_debug: bool = False
     pre_rerank_chunks: Optional[List["ScoredChunk"]] = None
     rerank_detail: Optional["RerankResult"] = None
+    graph_chunk_ids: Optional[set] = None
 
     def record_time(self, phase: str, elapsed: float) -> None:
         """Record elapsed time for a named pipeline phase."""
