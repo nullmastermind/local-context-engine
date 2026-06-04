@@ -113,10 +113,15 @@ def _get_embed_concurrency(model: Any) -> int:
     """Return the number of concurrent embedding API threads to use.
 
     Checks ``CORBELL_EMBED_CONCURRENCY`` env var first; falls back to a
-    provider-aware default:
-    - VoyageEmbeddingModel  → 30
-    - GoogleEmbeddingModel  → 8
+    provider-aware default scaled by the number of API keys configured:
+
+    - VoyageEmbeddingModel  → 30 per key (paid tier handles 300 req/s per key)
+    - GoogleEmbeddingModel  → 8 per key  (1500 req/min ≈ 25/s per key)
     - unknown               → 4
+
+    With multiple keys the model round-robins requests across them, so each key
+    sees 1/N of the traffic.  Scaling concurrency by key count exploits the full
+    aggregate rate-limit budget.
     """
     env_val = os.environ.get("CORBELL_EMBED_CONCURRENCY", "").strip()
     if env_val:
@@ -127,10 +132,12 @@ def _get_embed_concurrency(model: Any) -> int:
 
     from corbell.core.embeddings.model import GoogleEmbeddingModel, VoyageEmbeddingModel
 
+    num_keys = max(1, len(getattr(model, "_api_keys", []) or [1]))
+
     if isinstance(model, VoyageEmbeddingModel):
-        return 30
+        return 30 * num_keys
     if isinstance(model, GoogleEmbeddingModel):
-        return 8
+        return 8 * num_keys
     return 4
 
 
