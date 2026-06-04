@@ -46,6 +46,53 @@ def debug(
 
     default_workspace = workspace or os.environ.get("CORBELL_WORKSPACE") or str(Path.cwd())
 
+    def run_mcp_tool(
+        env_vars_text: str,
+        mcp_workspace: str,
+        mcp_query: str,
+        mcp_top_k: int,
+        mcp_rerank: bool,
+    ):  # type: ignore[no-untyped-def]
+        """Invoke context_engine_codebase_retrieval directly and return results."""
+        if not mcp_query.strip():
+            return "", ""
+
+        # Apply env var overrides for this invocation
+        env_backup: dict[str, str | None] = {}
+        if env_vars_text.strip():
+            for line in env_vars_text.strip().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key, value = key.strip(), value.strip()
+                env_backup[key] = os.environ.get(key)
+                os.environ[key] = value
+
+        try:
+            from corbell.core.mcp.server import context_engine_codebase_retrieval
+
+            result = context_engine_codebase_retrieval(
+                query=mcp_query.strip(),
+                workspace_full_path=mcp_workspace.strip(),
+                top_k=int(mcp_top_k),
+                rerank=bool(mcp_rerank),
+            )
+
+            if result.startswith("Error:"):
+                return result, ""
+            return "", result
+        except Exception as exc:
+            return f"Error: {exc}", ""
+        finally:
+            for key, original in env_backup.items():
+                if original is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = original
+
     def run_query(workspace_path: str, query: str):  # type: ignore[no-untyped-def]
         """Run the debug pipeline and return Gradio component values."""
         from corbell.core.query.engine import codebase_retrieval_debug
@@ -189,6 +236,63 @@ def debug(
                     interactive=False,
                 )
 
+            with gr.Tab("MCP Debug"):
+                gr.Markdown(
+                    "### MCP Tool Tester\n"
+                    "Configure environment and invoke "
+                    "`context_engine_codebase_retrieval` directly."
+                )
+
+                with gr.Accordion("Environment Configuration", open=False):
+                    mcp_env_vars = gr.Textbox(
+                        label="Environment Variables (one per line, KEY=VALUE)",
+                        placeholder=(
+                            "# Example:\n"
+                            "CORBELL_LLM_PROVIDER=anthropic\n"
+                            "CORBELL_RERANK=true\n"
+                            "ANTHROPIC_API_KEY=sk-..."
+                        ),
+                        lines=6,
+                    )
+
+                gr.Markdown("#### Tool Parameters")
+                with gr.Row():
+                    mcp_workspace_input = gr.Textbox(
+                        label="workspace_full_path",
+                        value=default_workspace,
+                        placeholder="Path to repository root",
+                        scale=3,
+                    )
+                mcp_query_input = gr.Textbox(
+                    label="query",
+                    placeholder="e.g. authentication middleware",
+                )
+                with gr.Row():
+                    mcp_top_k_input = gr.Number(
+                        label="top_k",
+                        value=50,
+                        precision=0,
+                        minimum=1,
+                        maximum=500,
+                    )
+                    mcp_rerank_input = gr.Checkbox(
+                        label="rerank",
+                        value=True,
+                    )
+
+                mcp_run_btn = gr.Button("Invoke MCP Tool", variant="primary")
+
+                mcp_error_box = gr.Textbox(
+                    label="Error",
+                    visible=True,
+                    interactive=False,
+                    lines=2,
+                )
+                mcp_result_box = gr.Code(
+                    label="Tool Response",
+                    language=None,
+                )
+
         run_btn.click(
             fn=run_query,
             inputs=[workspace_input, query_input],
@@ -201,6 +305,18 @@ def debug(
                 rerank_user_box,
                 rerank_response_box,
             ],
+        )
+
+        mcp_run_btn.click(
+            fn=run_mcp_tool,
+            inputs=[
+                mcp_env_vars,
+                mcp_workspace_input,
+                mcp_query_input,
+                mcp_top_k_input,
+                mcp_rerank_input,
+            ],
+            outputs=[mcp_error_box, mcp_result_box],
         )
 
     console.print(f"[green]Starting Corbell debug UI on port {port}...[/green]")
