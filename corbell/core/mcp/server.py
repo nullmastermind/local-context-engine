@@ -6,9 +6,7 @@ supporting both stdio and SSE transports.
 
 from __future__ import annotations
 
-import asyncio
 import os
-import sys
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
@@ -137,35 +135,6 @@ def _resolve_workspace(workspace_full_path: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Filtered stdin wrapper — prevents empty-line crashes in MCP SDK
-# ---------------------------------------------------------------------------
-
-class _FilteredStdin:
-    """Async iterator over stdin that silently drops empty/whitespace lines.
-
-    The MCP SDK's stdio transport passes every raw line from sys.stdin to
-    Pydantic's JSONRPCMessage.model_validate_json(). Empty newlines fail
-    validation and crash the server. This wrapper filters them out.
-    """
-
-    def __init__(self) -> None:
-        self._reader = None
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self) -> str:
-        loop = asyncio.get_event_loop()
-        while True:
-            line = await loop.run_in_executor(None, sys.stdin.readline)
-            if not line:  # EOF
-                raise StopAsyncIteration
-            if line.strip():  # Only forward non-empty lines
-                return line
-            # Empty/whitespace lines are silently dropped
-
-
-# ---------------------------------------------------------------------------
 # Server entry point
 # ---------------------------------------------------------------------------
 
@@ -177,24 +146,8 @@ def serve(transport: str = "stdio", port: int = 8000) -> None:
         port: Port number for SSE transport (ignored for stdio).
     """
     if transport == "sse":
-        print(f"Corbell MCP server starting on http://localhost:{port}/sse ...", file=sys.stderr)
         mcp.settings.port = port
-        mcp.run(transport="sse")
-    else:
-        print("Corbell MCP server starting on stdio...", file=sys.stderr)
-
-        async def _run():
-            from mcp.server.stdio import stdio_server
-
-            filtered = _FilteredStdin()
-            async with stdio_server(stdin=filtered) as (read_stream, write_stream):
-                await mcp._mcp_server.run(
-                    read_stream,
-                    write_stream,
-                    mcp._mcp_server.create_initialization_options(),
-                )
-
-        asyncio.run(_run())
+    mcp.run(transport=transport)
 
 
 def main() -> None:

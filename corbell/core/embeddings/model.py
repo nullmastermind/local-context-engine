@@ -339,12 +339,14 @@ class VoyageEmbeddingModel(EmbeddingModel):
                 key = self._api_keys[idx]
                 try:
                     vo = voyageai.Client(api_key=key)
-                    result = vo.embed(
-                        batch,
-                        model=self.model_name,
-                        input_type=input_type,
-                        output_dimension=self.dimension,
-                    )
+                    kwargs: dict = {
+                        "model": self.model_name,
+                        "input_type": input_type,
+                    }
+                    import inspect
+                    if "output_dimension" in inspect.signature(vo.embed).parameters:
+                        kwargs["output_dimension"] = self.dimension
+                    result = vo.embed(batch, **kwargs)
                     self._key_index = (idx + 1) % len(self._api_keys)
                     return result.embeddings
                 except Exception as e:
