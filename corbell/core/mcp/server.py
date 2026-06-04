@@ -54,16 +54,6 @@ _engine_logger = logging.getLogger("corbell.core.query.engine")
 _engine_logger.setLevel(logging.DEBUG)
 _engine_logger.addHandler(_fh)
 
-# Route embeddings model logger to MCP log too
-_emb_logger = logging.getLogger("corbell.core.embeddings.model")
-_emb_logger.setLevel(logging.DEBUG)
-_emb_logger.addHandler(_fh)
-
-# Route workspace config logger
-_ws_logger = logging.getLogger("corbell.core.workspace")
-_ws_logger.setLevel(logging.DEBUG)
-_ws_logger.addHandler(_fh)
-
 
 # ---------------------------------------------------------------------------
 # Tool: context_engine_codebase_retrieval
@@ -118,8 +108,6 @@ async def context_engine_codebase_retrieval(
         # event loop, those calls deadlock because httpx's sync transport
         # tries to use the already-blocked event loop.
         def _run_pipeline():
-            import threading
-            _mcp_logger.info("Pipeline thread started: thread=%s", threading.current_thread().name)
             return codebase_retrieval(
                 query=query,
                 workspace_path=ws_path,

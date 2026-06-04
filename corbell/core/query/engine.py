@@ -71,16 +71,11 @@ def _execute_pipeline(
             diagnostics,
         )
 
-    _t_cfg = time.time()
     cfg = build_config(workspace_path)
-    logger.info("engine build_config: (%.3fs)", time.time() - _t_cfg)
-
-    _t_db = time.time()
     db_path = db_path_for_workspace(workspace_path, model=cfg.storage.resolved_model())
     emb_store = SQLiteEmbeddingStore(db_path)
     graph_store = SQLiteGraphStore(db_path)
     tracker = IndexTracker(db_path)
-    logger.info("engine open_stores: (%.3fs) db=%s", time.time() - _t_db, db_path)
 
     # --- Auto-index check ---
     chunk_count = emb_store.count()
@@ -103,7 +98,6 @@ def _execute_pipeline(
             logger.info("engine incremental rebuild done (%.3fs)", time.time() - _t_build)
 
     # --- LLM client setup ---
-    _t_llm = time.time()
     llm_client: Optional[Any] = None
     if use_llm:
         from corbell.core.llm_client import LLMClient
@@ -119,16 +113,11 @@ def _execute_pipeline(
             gcp_project=llm_cfg.gcp_project,
             gcp_region=llm_cfg.gcp_region,
         )
-    logger.info("engine llm_client_setup: (%.3fs) provider=%s model=%s",
-                time.time() - _t_llm,
-                cfg.llm.provider if use_llm else "none",
-                cfg.llm.resolved_model() if use_llm else "none")
 
     # --- Search queries ---
     search_queries = [query]
 
     # --- Embedding model ---
-    _t_emb_init = time.time()
     model_name = cfg.storage.resolved_model()
     emb_model: EmbeddingModel
     if model_name.startswith("gemini-"):
@@ -142,7 +131,6 @@ def _execute_pipeline(
             f"  - voyage-code-3 or voyage-4-lite (requires VOYAGE_API_KEY)\n"
             f"  - gemini-embedding-001 (requires GOOGLE_API_KEY)"
         )
-    logger.info("engine emb_model_init: (%.3fs) model=%s", time.time() - _t_emb_init, model_name)
 
     # --- Load search cache ---
     _t_cache = time.time()
@@ -157,13 +145,10 @@ def _execute_pipeline(
     all_embedding_results: dict[str, ScoredChunk] = {}
     query_config = cfg.query
 
-    logger.info("engine pre-encode: search_queries=%s, model_type=%s", search_queries, type(emb_model).__name__)
-
     t0 = time.time()
     try:
         for sq in search_queries:
             _t_enc = time.time()
-            logger.info("engine encode start: query=%r", sq[:80])
             try:
                 if isinstance(emb_model, GoogleEmbeddingModel):
                     formatted_query = (
