@@ -11,10 +11,18 @@
 ## Add to Claude Code
 
 ```bash
-claude mcp add codebase-retrieval -e CORBELL_LLM_PROVIDER=google -e GOOGLE_API_KEY=your-google-api-key -e GOOGLE_MODEL=gemini-3.1-flash-lite -e CORBELL_EMBEDDING_MODEL=voyage-4-lite -e VOYAGE_API_KEY=your-voyage-api-key -- uvx codebase-retrieval-context-engine
+claude mcp add-json codebase-retrieval --scope user '{"type":"stdio","command":"uvx","args":["codebase-retrieval-context-engine"],"env":{"CORBELL_LLM_PROVIDER":"google","GOOGLE_API_KEY":"your-google-api-key","GOOGLE_MODEL":"gemini-3.1-flash-lite","CORBELL_EMBEDDING_MODEL":"voyage-4-lite","VOYAGE_API_KEY":"your-voyage-api-key"}}'
 ```
 
 That's it. The AI agent passes workspace path and triggers index builds automatically.
+
+## Remove from Claude Code
+
+```bash
+claude mcp remove codebase-retrieval --scope user
+```
+
+After adding, you can also edit or remove the MCP config directly in `~/.claude.json`.
 
 ---
 
